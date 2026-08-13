@@ -7,6 +7,9 @@ matplotlib>=3.8.0
 rich>=13.7.0
 tefas-crawler>=0.3.4
 
+# Hisse, altin/gumus ve doviz fiyatlari icin.
+yfinance>=0.2.40
+
 # Opsiyonel: SMTP uygulama şifresini macOS Anahtar Zinciri'nde saklar.
 # Kurulu değilse şifre ortam değişkeninden veya veri/mail.json'dan okunur.
 keyring>=25.0.0

@@ -5,8 +5,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "portfoy-cli"
 version = "1.0.0"
-description = "TEFAS yatırım fonu portföyü takip ve raporlama aracı"
-requires-python = ">=3.10"
+description = "Fon, hisse, altın/gümüş ve döviz portföyü takip aracı"
+# 3.9 ile dogrulandi: tum moduller `from __future__ import annotations`
+# kullandigi icin yeni tip sozdizimi calisma zamaninda deger almiyor.
+requires-python = ">=3.9"
 dependencies = [
     "requests>=2.31.0",
     "pandas>=2.1.0",
@@ -14,6 +16,7 @@ dependencies = [
     "matplotlib>=3.8.0",
     "rich>=13.7.0",
     "tefas-crawler>=0.3.4",
+    "yfinance>=0.2.40",
 ]
 
 [project.optional-dependencies]

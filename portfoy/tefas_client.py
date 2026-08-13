@@ -266,20 +266,30 @@ def fetch_many(
     lookback_days: int = config.LOOKBACK_DAYS,
     use_cache: bool = True,
 ) -> tuple[dict[str, FundHistory], dict[str, str]]:
-    """Birden cok fonu ceker.
+    """Birden cok varligi ceker.
+
+    Sembol turune gore dogru kaynaga yonlendirir: fonlar TEFAS'tan, hisse /
+    maden / doviz `assets` modulunden gelir. Her varlik icin hata ayri yakalanir;
+    biri cekilemezse digerleri raporlanmaya devam eder.
 
     Returns:
-        (basarili sonuclar, {fon_kodu: hata_mesaji})
+        (basarili sonuclar, {kod: hata_mesaji})
     """
+    from . import assets  # dairesel import olmasin diye fonksiyon icinde
+
     results: dict[str, FundHistory] = {}
     failures: dict[str, str] = {}
     for code in codes:
         try:
-            results[code] = fetch_history(code, lookback_days, use_cache)
+            info = assets.resolve(code)
+            if info.is_fund:
+                results[code] = fetch_history(code, lookback_days, use_cache)
+            else:
+                results[code] = assets.fetch_history(code, lookback_days)
             continue
         except TefasError as exc:
             message = str(exc)
-        except Exception as exc:  # beklenmedik her sey yalnizca bu fonu etkilesin
+        except Exception as exc:  # beklenmedik her sey yalnizca bu varligi etkilesin
             message = f"beklenmedik hata: {exc}"
 
         failures[code] = message

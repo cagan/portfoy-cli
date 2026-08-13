@@ -16,6 +16,7 @@ import logging
 import os
 import smtplib
 import ssl
+import sys
 from dataclasses import dataclass, field
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate
@@ -41,8 +42,16 @@ class MailError(RuntimeError):
 # --------------------------------------------------------------------------
 # Yapilandirma
 # --------------------------------------------------------------------------
+SMTP = "smtp"
+MAILAPP = "mailapp"          # macOS Mail.app uzerinden gonderim
+TRANSPORTS = (SMTP, MAILAPP)
+
+
 @dataclass
 class MailConfig:
+    # "smtp": dogrudan SMTP (uygulama sifresi gerekir)
+    # "mailapp": macOS Mail.app'te tanimli hesap uzerinden (sifre gerekmez)
+    transport: str = SMTP
     host: str = config.DEFAULT_SMTP_HOST
     port: int = config.DEFAULT_SMTP_PORT
     user: str = ""
@@ -56,6 +65,11 @@ class MailConfig:
 
     def missing_fields(self) -> list[str]:
         eksik = []
+        if self.transport == MAILAPP:
+            # Mail.app kimlik dogrulamayi kendi yapar; hesap ve sifre gerekmez.
+            if not self.recipients:
+                eksik.append("alıcı adresi")
+            return eksik
         if not self.user:
             eksik.append("gönderen hesap (kullanıcı)")
         if not self.password:
@@ -107,6 +121,15 @@ def load_config(path: Path | None = None) -> MailConfig:
     path = path or config.MAIL_CONFIG_FILE
     stored = _read_config_file(path)
 
+    transport = (
+        os.environ.get("PORTFOY_MAIL_TRANSPORT")
+        or stored.get("gonderim")
+        or SMTP
+    ).strip().lower()
+    if transport not in TRANSPORTS:
+        logger.warning("Bilinmeyen gönderim yöntemi: %r — smtp kullanılıyor.", transport)
+        transport = SMTP
+
     user = os.environ.get("PORTFOY_SMTP_USER") or stored.get("kullanici", "")
     sender = os.environ.get("PORTFOY_MAIL_FROM") or stored.get("gonderen", "")
     host = os.environ.get("PORTFOY_SMTP_HOST") or stored.get("sunucu") or config.DEFAULT_SMTP_HOST
@@ -133,6 +156,7 @@ def load_config(path: Path | None = None) -> MailConfig:
     )
 
     return MailConfig(
+        transport=transport,
         host=host,
         port=port,
         user=user,
@@ -149,6 +173,7 @@ def save_config(
     host: str = config.DEFAULT_SMTP_HOST,
     port: int = config.DEFAULT_SMTP_PORT,
     path: Path | None = None,
+    transport: str = SMTP,
 ) -> tuple[Path, str]:
     """Ayarlari kaydeder.
 
@@ -160,6 +185,7 @@ def save_config(
     previous = _read_config_file(path)
 
     payload = {
+        "gonderim": transport,
         "kullanici": user,
         "alicilar": recipients,
         "sunucu": host,
@@ -219,7 +245,7 @@ def _marked(row, period: str) -> str:
 
 def build_text_body(analysis: PortfolioAnalysis) -> str:
     lines = [
-        f"TEFAS Portföy Raporu — {analysis.as_of:%d.%m.%Y}",
+        f"Portföy Raporu — {analysis.as_of:%d.%m.%Y}",
         "",
         f"Toplam Portföy Değeri: {fmt_money(analysis.total_value)}",
         f"Önceki Güne Göre Değişim: {fmt_money_change(analysis.value_change('gunluk'))}",
@@ -292,13 +318,20 @@ def build_html_body(analysis: PortfolioAnalysis, inline_images: dict[str, str]) 
         return positive if value >= 0 else negative
 
     headers = [
-        "Fon", "Adet", "Fiyat", "Değer ₺", "Ağırlık",
+        "Varlık", "Adet", "Fiyat", "Değer ₺", "Ağırlık",
         "Günlük", "Günlük ₺", "Haftalık", "Aylık", "Katkı",
     ]
+    # Zemin rengi hem <th>'ye hem de metni saran <span>'e yazilir. macOS
+    # Mail.app, `html content` ayarlandiginda HTML'i yeniden uretiyor ve metin
+    # parcalarina ortam zemin rengini (acik) yapistiriyor; zemin yalnizca
+    # <th>'de kalirsa beyaz yazi beyaz zemine dusup gorunmez oluyor. En ic
+    # elemente de yazilinca dogru renk tasiniyor (Mail.app ile dogrulandi).
+    header_bg = palette["text_primary"]
     header_cells = "".join(
         f'<th style="padding:10px 12px;text-align:{"left" if i == 0 else "right"};'
-        f'background:{palette["text_primary"]};color:#ffffff;font-size:12px;'
-        f'font-weight:600;white-space:nowrap">{name}</th>'
+        f'background:{header_bg};color:#ffffff;font-size:12px;'
+        f'font-weight:600;white-space:nowrap">'
+        f'<span style="color:#ffffff;background:{header_bg}">{name}</span></th>'
         for i, name in enumerate(headers)
     )
 
@@ -414,7 +447,7 @@ def build_html_body(analysis: PortfolioAnalysis, inline_images: dict[str, str]) 
  <div style="max-width:760px;margin:0 auto;background:{palette['surface']};
   border-radius:10px;padding:28px;border:1px solid rgba(11,11,11,0.10)">
 
-  <h1 style="margin:0;font-size:20px">TEFAS Portföy Raporu</h1>
+  <h1 style="margin:0;font-size:20px">Portföy Raporu</h1>
   <p style="margin:4px 0 20px;color:{palette['text_secondary']};font-size:13px">
    Veri tarihi: {analysis.as_of:%d.%m.%Y}</p>
 
@@ -512,8 +545,87 @@ def send_report(
             "Kurmak için: python main.py mail-ayar --kullanici ADRES"
         )
 
-    _deliver(build_message(analysis, attachments, settings), settings)
+    if settings.transport == MAILAPP:
+        _deliver_via_mailapp(analysis, attachments, settings)
+    else:
+        _deliver(build_message(analysis, attachments, settings), settings)
     return list(settings.recipients)
+
+
+def _osa_quote(text: str) -> str:
+    """Metni AppleScript dizesi icine guvenle yerlestirir."""
+    return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+
+
+def _deliver_via_mailapp(
+    analysis: PortfolioAnalysis,
+    attachments: list[Path] | None,
+    settings: MailConfig,
+) -> None:
+    """macOS Mail.app'te tanimli hesap uzerinden gonderir.
+
+    SMTP kimlik bilgisi gerektirmez; Mail.app hangi hesabi kullanacagini kendi
+    secer (belirtilmisse `settings.user` adresine sahip hesap). Govde HTML
+    olarak yazilir; PNG'ler cid ile gomulmek yerine ek olarak eklenir, cunku
+    Mail.app ekleri zaten govdede gosterir.
+    """
+    import shutil
+    import subprocess
+
+    if sys.platform != "darwin":
+        raise MailError("Mail.app gönderimi yalnızca macOS'ta çalışır.")
+    if not shutil.which("osascript"):
+        raise MailError("osascript bulunamadı — Mail.app gönderimi yapılamıyor.")
+
+    dosyalar = [p for p in (attachments or []) if p and p.exists()]
+    govde = build_html_body(analysis, {})          # cid yok: ekler ayri gidiyor
+    konu = build_subject(analysis)
+
+    satirlar = [
+        'tell application "Mail"',
+        f'    set msg to make new outgoing message with properties '
+        f'{{subject:"{_osa_quote(konu)}", visible:true}}',
+        '    tell msg',
+    ]
+    for adres in settings.recipients:
+        satirlar.append(
+            f'        make new to recipient at end of to recipients '
+            f'with properties {{address:"{_osa_quote(adres)}"}}'
+        )
+    satirlar.append('    end tell')
+    satirlar.append(f'    set html content of msg to "{_osa_quote(govde)}"')
+
+    if dosyalar:
+        satirlar.append('    delay 1')
+        satirlar.append('    tell msg')
+        satirlar.append('        tell content')
+        for dosya in dosyalar:
+            satirlar.append(
+                f'            make new attachment with properties '
+                f'{{file name:(POSIX file "{_osa_quote(str(dosya.resolve()))}")}} '
+                f'at after last paragraph'
+            )
+        satirlar.append('        end tell')
+        satirlar.append('    end tell')
+
+    satirlar += ['    delay 2', '    send msg', 'end tell']
+
+    try:
+        sonuc = subprocess.run(
+            ["osascript", "-"], input="\n".join(satirlar),
+            capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise MailError("Mail.app yanıt vermedi (zaman aşımı).") from exc
+
+    if sonuc.returncode != 0:
+        hata = (sonuc.stderr or "").strip() or "bilinmeyen hata"
+        if "-1743" in hata or "not allowed" in hata.lower():
+            raise MailError(
+                "Mail.app'i yönetme izni yok. Sistem Ayarları > Gizlilik ve "
+                "Güvenlik > Otomasyon altından terminaline Mail izni verin."
+            )
+        raise MailError(f"Mail.app gönderimi başarısız: {hata}")
 
 
 def _deliver(message: EmailMessage, settings: MailConfig) -> None:

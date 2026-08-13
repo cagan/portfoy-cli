@@ -41,7 +41,7 @@ def _collect_analysis(portfolio: Portfolio, args) -> analytics.PortfolioAnalysis
     """Fiyatlari ceker ve analizi uretir. Portfoy bossa None doner."""
     if portfolio.is_empty():
         path = args.data_file or config.PORTFOLIO_FILE
-        durum = "dosya henüz oluşmamış" if not path.exists() else "dosyada kayıtlı fon yok"
+        durum = "dosya henüz oluşmamış" if not path.exists() else "dosyada kayıtlı varlık yok"
         print(
             f"Portföy boş ({durum}).\n"
             f"Adetler şuraya kaydedilir: {path}\n\n"
@@ -53,7 +53,7 @@ def _collect_analysis(portfolio: Portfolio, args) -> analytics.PortfolioAnalysis
         )
         return None
 
-    print(f"TEFAS'tan veri çekiliyor: {', '.join(portfolio.codes)} ...")
+    print(f"Fiyatlar çekiliyor: {', '.join(portfolio.codes)} ...")
     histories, failures = tefas_client.fetch_many(
         portfolio.codes,
         lookback_days=args.days,
@@ -137,7 +137,7 @@ def _print_lot_hint(portfolio, code: str, on, price) -> None:
         return
 
     print(
-        f"  Not: {code} için alış tarihi yok. Haftalık/aylık getiri, fon portföye\n"
+        f"  Not: {code} için alış tarihi yok. Haftalık/aylık getiri, varlık portföye\n"
         "  girmeden önceki günleri de kapsar. Düzeltmek için:\n"
         # Adet burada dogrudan komuta yapistirilacak: Turkce binlik ayraci
         # kullanilirsa argparse sayiyi sessizce yanlis okur.
@@ -147,7 +147,7 @@ def _print_lot_hint(portfolio, code: str, on, price) -> None:
 
 
 def cmd_lots(args) -> int:
-    """Kayitli alis/satis islemlerini gosterir (TEFAS'a baglanmadan)."""
+    """Kayitli alis/satis islemlerini gosterir (aga baglanmadan)."""
     portfolio = _load_portfolio(args)
     codes = [storage.normalize_code(args.code)] if args.code else portfolio.codes
     if not codes:
@@ -298,15 +298,27 @@ def cmd_mail_setup(args) -> int:
     import getpass
 
     current = mailer.load_config()
+    transport = (args.transport or current.transport).strip().lower()
+    mailapp = transport == mailer.MAILAPP
+
     user = args.user or current.user
-    if not user:
+    # Mail.app gonderiminde hesap Mail tarafinda tanimli; --user yalnizca
+    # alici varsayilanini belirlemek icin kullanilir, zorunlu degil.
+    if not user and not mailapp:
         print("Gönderen hesabı belirtin: --user ornek@gmail.com", file=sys.stderr)
         return EXIT_ERROR
 
-    recipients = args.to or current.recipients or [config.DEFAULT_MAIL_TO or user]
+    recipients = args.to or current.recipients or (
+        [config.DEFAULT_MAIL_TO or user] if user else []
+    )
+    if not recipients:
+        print("Alıcı adresi belirtin: --to ornek@icloud.com", file=sys.stderr)
+        return EXIT_ERROR
 
     password = None
-    if not args.no_password_prompt:
+    if mailapp:
+        pass  # Mail.app kimlik dogrulamayi kendi yapar
+    elif not args.no_password_prompt:
         prompt = (
             f"{user} için uygulama şifresi "
             "(Gmail: myaccount.google.com/apppasswords, boş bırakırsanız değişmez): "
@@ -323,6 +335,7 @@ def cmd_mail_setup(args) -> int:
         password=password,
         host=args.host,
         port=args.port,
+        transport=transport,
     )
 
     print(f"Ayarlar kaydedildi: {path}")
@@ -380,7 +393,7 @@ def cmd_clear_cache(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="portfoy",
-        description="TEFAS yatırım fonu portföyü takip ve raporlama aracı.",
+        description="Yatırım fonu, hisse, altın/gümüş ve döviz portföyü takip aracı.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Örnekler:\n"
@@ -405,8 +418,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
 
     # --- add ---
-    p_add = subparsers.add_parser("add", help="Fon ekle veya adedini güncelle.")
-    p_add.add_argument("code", help="Fon kodu (örn: TLY)")
+    p_add = subparsers.add_parser("add", help="Varlık ekle veya adedini güncelle.")
+    p_add.add_argument("code", help="Varlık kodu: fon (PHE), hisse (TUPRS), ALTIN, GUMUS, USD, EUR")
     p_add.add_argument("units", type=float, help="Elinizdeki pay adedi")
     p_add.add_argument(
         "--accumulate",
@@ -433,16 +446,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_lots = subparsers.add_parser(
         "lots", help="Kayıtlı alış/satış işlemlerini göster."
     )
-    p_lots.add_argument("code", nargs="?", help="Fon kodu (boş bırakılırsa hepsi)")
+    p_lots.add_argument("code", nargs="?", help="Varlık kodu (boş bırakılırsa hepsi)")
     p_lots.set_defaults(func=cmd_lots)
 
     # --- remove ---
-    p_remove = subparsers.add_parser("remove", help="Fonu portföyden çıkar.")
-    p_remove.add_argument("code", help="Fon kodu")
+    p_remove = subparsers.add_parser("remove", help="Varlığı portföyden çıkar.")
+    p_remove.add_argument("code", help="Varlık kodu")
     p_remove.set_defaults(func=cmd_remove)
 
     # --- list ---
-    p_list = subparsers.add_parser("list", help="Kayıtlı fonları göster (veri çekmeden).")
+    p_list = subparsers.add_parser("list", help="Kayıtlı varlıkları göster (veri çekmeden).")
     p_list.set_defaults(func=cmd_list)
 
     # --- target ---
@@ -512,6 +525,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_mail = subparsers.add_parser(
         "mail-setup",
         help="E-posta gönderimini yapılandır (şifre gizli sorulur).",
+    )
+    p_mail.add_argument(
+        "--transport", choices=["smtp", "mailapp"],
+        help="smtp: doğrudan SMTP, uygulama şifresi gerekir. "
+             "mailapp: macOS Mail.app'teki hesabı kullanır, şifre gerekmez.",
     )
     p_mail.add_argument("--user", help="Gönderen SMTP hesabı (örn: ornek@gmail.com)")
     p_mail.add_argument(

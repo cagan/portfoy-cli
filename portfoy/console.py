@@ -8,6 +8,7 @@ from pathlib import Path
 from . import __version__
 from .analytics import PortfolioAnalysis
 from . import config
+from . import assets
 from .formatting import (
     fmt_money, fmt_money_change, fmt_number, fmt_pct, fmt_points, fmt_price, fmt_units
 )
@@ -49,14 +50,14 @@ def _render_rich(analysis: PortfolioAnalysis) -> None:
 
     # SIMPLE_HEAD: dikey cizgiler yok -> dar terminallerde de sigar.
     table = Table(
-        title=f"TEFAS Portföyü · {analysis.as_of:%d.%m.%Y}",
+        title=f"Portföy · {analysis.as_of:%d.%m.%Y}",
         title_style="bold",
         header_style="bold",
         box=box.SIMPLE_HEAD,
         expand=False,
         pad_edge=False,
     )
-    table.add_column("Fon", style="bold", no_wrap=True)
+    table.add_column("Varlık", style="bold", no_wrap=True)
     table.add_column("Adet", justify="right", no_wrap=True)
     table.add_column("Fiyat", justify="right", no_wrap=True)
     table.add_column("Değer ₺", justify="right", no_wrap=True)
@@ -181,7 +182,7 @@ def _render_plain(analysis: PortfolioAnalysis) -> None:
         f"{'Ağırlık':>10}{'Günlük':>11}{'Haftalık':>11}{'Aylık':>11}"
     )
     print()
-    print(f"TEFAS Portföyü · {analysis.as_of:%d.%m.%Y}")
+    print(f"Portföy · {analysis.as_of:%d.%m.%Y}")
     print("-" * len(header))
     print(header)
     print("-" * len(header))
@@ -231,7 +232,7 @@ def print_holdings(portfolio) -> None:
 
     undated = portfolio.undated_codes()
     hint = (
-        "Alış tarihi olmayan fonlarda periyot getirileri, fon portföye girmeden "
+        "Alış tarihi olmayan varlıklarda periyot getirileri, fon portföye girmeden "
         "önceki günleri de kapsar.\n"
         f"Düzeltmek için: {invocation()} add {undated[0]} <adet> --date GG.AA.YYYY "
         "--price <fiyat>"
@@ -240,7 +241,8 @@ def print_holdings(portfolio) -> None:
     if _RICH:
         console = Console()
         table = Table(title="Kayıtlı Portföy", header_style="bold", box=box.SIMPLE_HEAD)
-        table.add_column("Fon", style="bold")
+        table.add_column("Varlık", style="bold")
+        table.add_column("Tür")
         table.add_column("Adet", justify="right")
         table.add_column("Alış", justify="center")
         table.add_column("Ort. Maliyet", justify="right")
@@ -251,6 +253,7 @@ def print_holdings(portfolio) -> None:
             average = position.average_cost
             table.add_row(
                 code,
+                assets.describe(code),
                 fmt_units(position.units),
                 acquired.strftime("%d.%m.%Y") if acquired else "—",
                 fmt_price(average) if average else "—",
@@ -294,14 +297,23 @@ HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     (
         "Portföy",
         (
-            ("add CODE UNITS", "Fon ekler; fon kayıtlıysa adedini değiştirir"),
+            ("add CODE UNITS", "Varlık ekler; kayıtlıysa adedini değiştirir"),
             ("add ... --date GG.AA.YYYY", "Alış tarihi; periyot getirisi bu tarihten itibaren sayılır"),
             ("add ... --price FİYAT", "Alış birim fiyatı; maliyet ve kar/zarar hesaplanır"),
             ("add CODE UNITS --accumulate", "Mevcut adedin üzerine ekler (negatif değer düşer)"),
-            ("remove CODE", "Fonu portföyden çıkarır"),
-            ("list", "Kayıtlı fonları gösterir (TEFAS'a bağlanmadan)"),
+            ("remove CODE", "Varlığı portföyden çıkarır"),
+            ("list", "Kayıtlı varlıkları gösterir (ağa bağlanmadan)"),
             ("lots [CODE]", "Kayıtlı alış/satış işlemlerini gösterir"),
             ("target PERCENT", "Aylık getiri hedefini ayarlar, örn: target 12"),
+        ),
+    ),
+    (
+        "Varlık kodları",
+        (
+            ("3 harfli kod", "TEFAS fonu — örn: PHE, TLY, DFI"),
+            ("4-6 harfli kod", "BIST hissesi — örn: TUPRS, GARAN, ASELS"),
+            ("ALTIN / GUMUS", "Gram altın / gram gümüş (ons × USD/TRY)"),
+            ("USD / EUR", "Döviz kuru, TL karşılığı"),
         ),
     ),
     (
@@ -321,7 +333,7 @@ HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     (
         "Bakım",
         (
-            ("clear-cache", "Yerel TEFAS veri önbelleğini siler"),
+            ("clear-cache", "Yerel fon fiyatı önbelleğini siler"),
             ("help", "Bu ekranı gösterir"),
         ),
     ),
@@ -342,7 +354,7 @@ def _flag_sections() -> tuple[tuple[str, tuple[tuple[str, str], ...]], ...]:
             "Veri çekme bayrakları — status, report, mail-test",
             (
                 ("--days N", f"Kaç günlük geçmiş çekilsin (varsayılan: {config.LOOKBACK_DAYS})"),
-                ("--no-cache", "Önbelleği atla, veriyi TEFAS'tan yeniden çek"),
+                ("--no-cache", "Önbelleği atla, fiyatları kaynaktan yeniden çek"),
             ),
         ),
         (
@@ -381,13 +393,15 @@ def invocation() -> str:
 def help_examples() -> tuple[str, ...]:
     run = invocation()
     return (
-        f"{run} add TMV 40631 --date 03.08.2026 --price 8.613999",
-        f"{run} add DFI 300 --accumulate --date 05.08.2026 --price 12.4",
-        f"{run} add DFI -300 --accumulate --date 07.08.2026   # kısmi satış",
-        f"{run} lots TMV",
+        f"{run} add PHE 7493 --date 16.07.2026 --price 3.891826   # fon",
+        f"{run} add TUPRS 110 --date 13.08.2025 --price 145        # BIST hissesi",
+        f"{run} add ALTIN 65 --date 02.02.2026 --price 4100        # gram altın",
+        f"{run} add USD 2000 --date 20.01.2026 --price 41.30       # döviz",
+        f"{run} add TUPRS -40 --accumulate --date 07.08.2026       # kısmi satış",
+        f"{run} lots TUPRS",
         f"{run} status",
         f"{run} report --show --theme dark",
-        f"{run} --data-file ~/alt.json status  # ikinci bir portföy",
+        f"{run} --data-file ~/alt.json status   # ikinci bir portföy",
     )
 
 
@@ -405,7 +419,7 @@ def _print_help_rich(sections) -> None:
     title = Text()
     title.append("portfoy", style="bold cyan")
     title.append(f"  v{__version__}", style="dim")
-    title.append("   TEFAS yatırım fonu portföyü takip ve raporlama aracı", style="dim")
+    title.append("   Fon, hisse, altın/gümüş ve döviz portföyü takip aracı", style="dim")
 
     console.print()
     console.print(title)
@@ -436,7 +450,7 @@ def _print_help_plain(sections) -> None:
     )
 
     print()
-    print(f"portfoy v{__version__} — TEFAS yatırım fonu portföyü takip ve raporlama aracı")
+    print(f"portfoy v{__version__} — Fon, hisse, altın/gümüş ve döviz portföyü takip aracı")
     for heading, entries in sections:
         print(f"\n{heading}")
         for name, description in entries:
