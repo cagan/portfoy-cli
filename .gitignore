@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Kişisel portföy verisi ve üretilen raporlar
+veri/
+ciktilar/
+
+# macOS ve editör artıkları
+.DS_Store
+.claude/

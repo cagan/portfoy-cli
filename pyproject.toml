@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "portfoy-cli"
+version = "1.0.0"
+description = "TEFAS yatırım fonu portföyü takip ve raporlama aracı"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31.0",
+    "pandas>=2.1.0",
+    "openpyxl>=3.1.2",
+    "matplotlib>=3.8.0",
+    "rich>=13.7.0",
+    "tefas-crawler>=0.3.4",
+]
+
+[project.optional-dependencies]
+# SMTP sifresini macOS Anahtar Zinciri'nde saklar; yoksa ortam degiskeni kullanilir.
+keyring = ["keyring>=25.0.0"]
+
+[project.scripts]
+portfoy = "portfoy.cli:main"
+
+[tool.setuptools]
+# Yalnizca paket kurulur. veri/ ve ciktilar/ depoda kalir: config.BASE_DIR
+# portfoy/config.py'nin konumundan turedigi icin komut nereden calistirilirsa
+# calistirilsin ayni portfoy dosyasi ve ayni cikti klasoru kullanilir.
+packages = ["portfoy"]

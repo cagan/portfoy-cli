@@ -1,0 +1,12 @@
+# Calisma zamani bagimliliklari. pyproject.toml da ayni listeyi tasir;
+# birini degistirirken digerini de guncelleyin.
+requests>=2.31.0
+pandas>=2.1.0
+openpyxl>=3.1.2
+matplotlib>=3.8.0
+rich>=13.7.0
+tefas-crawler>=0.3.4
+
+# Opsiyonel: SMTP uygulama şifresini macOS Anahtar Zinciri'nde saklar.
+# Kurulu değilse şifre ortam değişkeninden veya veri/mail.json'dan okunur.
+keyring>=25.0.0
