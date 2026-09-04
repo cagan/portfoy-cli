@@ -351,6 +351,11 @@ def cmd_emir(args) -> int:
         print("Hata: Adet/tutar pozitif olmalı; yönü --sat/--al belirler.",
               file=sys.stderr)
         return EXIT_ERROR
+    # Fiyat, TL'li emirde BOLENDIR: sifir cozulmeyi patlatir, negatif ise
+    # adedi negatife cevirip alisi sessizce satisa dondururdu.
+    if args.price is not None and args.price <= 0:
+        print("Hata: --price pozitif olmalı.", file=sys.stderr)
+        return EXIT_ERROR
     portfolio = _load_portfolio(args)
     try:
         code = storage.normalize_code(args.code)

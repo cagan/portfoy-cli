@@ -386,11 +386,21 @@ class PortfoyServisi:
                     f"{fmt_money(tutar)} ÷ kapanış fiyatı olarak hesaplanacak; "
                     f"o güne kadar portföye girmez."
                 )
-            else:
+            elif satis:
+                # "Portfoyde kalir" YALNIZCA satista dogru: satilan paylar
+                # gerceklesmeye kadar sizde durur ve fiyat riskini tasirsiniz.
+                # Bekleyen bir ALIS ise portfoyde degil (lot ancak `coz` ile
+                # eklenir); ayni cumleyi orada yazmak olmayan paylari var
+                # gostermek olurdu.
                 aciklama.append(
                     f"{cozum.gerceklesme:%d.%m.%Y} değerleme fiyatı yayımlandığında "
                     f"işlem kaydına dönüşecek. Adetler o güne kadar portföyde kalır "
                     f"— fiyat riski sizde."
+                )
+            else:
+                aciklama.append(
+                    f"{cozum.gerceklesme:%d.%m.%Y} değerleme fiyatı yayımlandığında "
+                    f"işlem kaydına dönüşecek; o güne kadar portföye girmez."
                 )
         return emir.ozet(), aciklama
 

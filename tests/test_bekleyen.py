@@ -323,7 +323,7 @@ def test_goc_kaydetme_turundan_sonra_da_kalici(tmp_path):
 
     bekleyen.kaydet(bekleyen.yukle(yol), yol)        # kullanıcı bir emir ekler/siler
     ham = json.loads(yol.read_text(encoding="utf-8"))
-    assert ham["surum"] == 2
+    assert ham["surum"] == bekleyen.SCHEMA_VERSION
 
     geri = bekleyen.yukle(yol)[0]
     assert geri.gerceklesme == date(2026, 9, 2)      # göç kalıcı, sessiz kayma yok
@@ -412,3 +412,42 @@ def test_tutarli_emir_bekleyen_satis_adedini_etkilemez(portfoy, emir, tutar_emri
     """Alış emri rezerve üretmez; satış korumasının tabanını bozmamalı."""
     assert bekleyen.bekleyen_satis_adedi([emir, tutar_emri], "PHE") == 1000
     assert bekleyen.bekleyen_satis_adedi([tutar_emri], "THF") == 0
+
+
+def test_pozitif_olmayan_fiyat_reddedilir(takvim):
+    """Fiyat bölendir: sıfır çözülmeyi patlatır, negatif alışı satışa çevirir."""
+    cozum = valor.cozumle(
+        valor.kategori_kurali("Hisse Senedi Fonu"), takvim,
+        datetime(2026, 9, 1, 11, 0), satis=False,
+    )
+    for bozuk in (0.0, -2.0):
+        with pytest.raises(bekleyen.BekleyenHatasi, match="pozitif olmalı"):
+            bekleyen.emir_olustur("THF", None, cozum,
+                                  datetime(2026, 9, 1, 11, 0),
+                                  tutar=226000.0, fiyat=bozuk)
+
+
+def test_bozuk_fiyatli_kayit_cozulmeyi_dusurmez(tutar_emri, monkeypatch):
+    """Tek bozuk emir yüzünden döngü patlarsa o turdaki DİĞER emirler de işlenmez."""
+    pf = Portfolio()
+    # Disk kaydı elle bozulmuş gibi: dataclass korumasını atlayarak fiyat sıfırla.
+    object.__setattr__(tutar_emri, "fiyat", 0.0)
+    h = gecmis("THF", {date(2026, 9, 1): 2.75, date(2026, 9, 2): 2.825})
+
+    cozulen, kalan = bekleyen.coz([tutar_emri], pf, {"THF": h})
+
+    assert cozulen == [] and len(kalan) == 1     # patlamadı, beklemede kaldı
+    assert pf.positions == {}
+
+
+def test_surum2_kaydi_gocten_gecmez(tmp_path, tutar_emri):
+    """2 → 3 alan eklemesi; v2 kaydını 1→2 dönüşümünden geçirmek valörü ezerdi."""
+    yol = tmp_path / "bekleyen.json"
+    bekleyen.kaydet([tutar_emri], yol)
+    ham = json.loads(yol.read_text(encoding="utf-8"))
+    ham["surum"] = 2
+    yol.write_text(json.dumps(ham, ensure_ascii=False), encoding="utf-8")
+
+    geri = bekleyen.yukle(yol)[0]
+    assert geri.gerceklesme == tutar_emri.gerceklesme
+    assert geri.valor_gunu == tutar_emri.valor_gunu      # ezilmedi

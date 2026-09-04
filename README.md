@@ -103,7 +103,8 @@ Komut adları ve bayraklar İngilizce, çıktılar Türkçedir.
 | `add ... --price FİYAT` | Alış birim fiyatı — maliyet ve gerçek kar/zarar hesaplanır |
 | `add CODE UNITS --accumulate` | Mevcut adedin **üzerine ekler** (negatif değer düşer) |
 | `add CODE -UNITS --accumulate --date ... --price ...` | **Gerçekleşmiş** satışı kaydeder; tamamı satılırsa pozisyon kapanır |
-| `emir CODE UNITS --sat --tarih ... --saat ...` | **Emir** kaydeder; gerçekleşme gününü valörden türetir |
+| `emir CODE UNITS --sat --tarih ... --saat ...` | **Satış emri** kaydeder; işlem gününü emir saatinden türetir |
+| `emir CODE --al --tutar TL --tarih ... --saat ...` | **Alış emri**; adet, işlem günü fiyatı yayımlanınca hesaplanır |
 | `bekleyen` | Gerçekleşmeyi bekleyen emirleri gösterir |
 | `valor [CODE]` | Fon valör kurallarını gösterir/düzenler |
 | `remove CODE` | Fonu portföyden **siler** (işlem geçmişi de gider) |

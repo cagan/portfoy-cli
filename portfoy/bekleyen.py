@@ -41,7 +41,9 @@ logger = logging.getLogger(__name__)
 # docstring'i: bu kayma 69.991 adetlik bir satista 28.820,61 TL'ye mal oldu).
 # Dosya icerigine bakarak ayirt edilemez, o yuzden surumle isaretleniyor ve
 # `_surum2ye_tasi` ile YUKLENIRKEN cevriliyor; yalnizca uyarmak yetmezdi.
-SCHEMA_VERSION = 2
+# Surum 3: kayit `tutar` tasiyabiliyor ve `adet` null olabiliyor (TL ile
+# verilmis alis emri; adet islem gunu fiyati yayimlaninca dogar).
+SCHEMA_VERSION = 3
 
 
 class BekleyenHatasi(RuntimeError):
@@ -92,6 +94,15 @@ class BekleyenEmir:
                 "beklemedeki satış rezervesi sayılamaz ve aynı paylar iki kez "
                 "satılabilir. Satış emrini adetle girin."
             )
+        # Fiyat BOLENDIR (adet = tutar / fiyat): sifir cozulmeyi patlatir,
+        # negatif ise adedi negatife cevirir - yani ALIS sessizce SATISA doner
+        # ve `ozet()` mutlak deger yazdigi icin isaret ekranda kaybolur.
+        # TEFAS fiyati zaten pozitife suzuluyor; korumasiz olan tek yol
+        # kullanicinin elle girdigi fiyat.
+        if self.fiyat is not None and self.fiyat <= 0:
+            raise BekleyenHatasi(
+                f"Gerçekleşme fiyatı pozitif olmalı ({self.fiyat} girildi)."
+            )
 
     @property
     def satis_mi(self) -> bool:
@@ -141,7 +152,11 @@ class BekleyenEmir:
                 valor_supheli=bool(raw.get("valor_supheli", False)),
                 fiyat=float(raw["fiyat"]) if raw.get("fiyat") is not None else None,
             )
-        except (KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError, BekleyenHatasi) as exc:
+            # BekleyenHatasi de yakalaniyor: `__post_init__` kurallari disk
+            # kaydinda da ihlal edilebilir ve ham mesaj ("...girin") kullanicinin
+            # doldurmadigi bir formu isaret ederdi. Sarmalama hangi KAYIT
+            # oldugunu gosteriyor.
             raise BekleyenHatasi(f"Bekleyen emir kaydı okunamadı: {raw!r} ({exc})")
 
     def ozet(self) -> str:
@@ -335,6 +350,18 @@ def coz(
             tarih, fiyat, hizalandi = bulunan
             kaynak = "tefas"
 
+        if fiyat <= 0:
+            # Buraya normalde gelinmez (dataclass elle girilen fiyati, TEFAS
+            # istemcisi de seriyi pozitife zorluyor). Yine de bolmeden ONCE
+            # duruyoruz: tek bozuk kayit yuzunden dongunun ortasinda patlamak,
+            # o turdaki DIGER fonlarin emirlerini de islenmemis birakirdi.
+            logger.warning(
+                "%s emri işlenemedi: gerçekleşme fiyatı pozitif değil (%s). "
+                "Emir beklemede bırakıldı.", emir.kod, fiyat,
+            )
+            kalan.append(emir)
+            continue
+
         # TL ile verilmis emirde adet BURADA dogar: bolen, lotun kaydedilecegi
         # fiyatin ta kendisi. Emir verilirken bilinen son fiyatla bolmek, o
         # gunler arasindaki hareketi sahte kar/zarara cevirirdi.
@@ -420,7 +447,10 @@ def yukle(path: Path | None = None) -> list[BekleyenEmir]:
             "Bekleyen emir dosyası daha yeni bir sürümden (%s > %s); "
             "tanınmayan alanlar yok sayılacak.", surum, SCHEMA_VERSION,
         )
-    elif surum < SCHEMA_VERSION:
+    elif surum < 2:
+        # Yalnizca 1 -> 2 bir DONUSUM gerektiriyor. 2 -> 3 alan EKLEMESI:
+        # `from_dict` eksik `tutar`i None okur, cevrilecek bir sey yok.
+        # v2 kaydini `_surum2ye_tasi`dan gecirmek gercek `valor_gunu`nu ezerdi.
         kayitlar = [_surum2ye_tasi(item) for item in kayitlar]
         if kayitlar:
             logger.info(

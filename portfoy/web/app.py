@@ -668,6 +668,9 @@ def create_app(
             "bekleyen": [
                 {
                     "id": item.id, "kod": item.kod, "adet": item.adet,
+                    # TL ile verilmis emirde `adet` null; tutar olmadan API
+                    # tuketicisi emrin buyuklugunu hicbir yerden okuyamazdi.
+                    "tutar": item.tutar,
                     "gerceklesme": item.gerceklesme,
                     "valor_gunu": item.valor_gunu, "nakit": item.nakit,
                     "valor_supheli": item.valor_supheli,
