@@ -25,11 +25,18 @@ def hsyf():
 
 # --- Kesim saati -----------------------------------------------------------
 def test_kesim_sonrasi_emir_ertesi_is_gunune_kayar(takvim, hsyf):
-    """Gerçek olay: 01.09 15:00'te verilen emir 02.09'a kaydı."""
-    c = valor.cozumle(hsyf, takvim, datetime(2026, 9, 1, 15, 0), satis=True)
+    """Gerçek olay, dekontla doğrulanmış: 01.09 18:22'de verilen PHE satış emri.
+
+    Garanti BBVA İşlem Sonuç Formu (04.09.2026): işlem günü 02.09, uygulanan
+    birim fiyat 02.09 kapanışı (3,230415), hesaba geçiş 04.09. Yani FİYAT
+    işlem gününün kendisinden alınır; valör (03.09) yalnızca payların çıkış
+    günüdür. Kod bir dönem fiyatı 03.09'dan alıyordu.
+    """
+    c = valor.cozumle(hsyf, takvim, datetime(2026, 9, 1, 18, 22), satis=True)
     assert c.kesim_sonrasi
     assert c.islem_gunu == date(2026, 9, 2)
-    assert c.gerceklesme == date(2026, 9, 3)
+    assert c.gerceklesme == date(2026, 9, 2)      # fiyat günü = T
+    assert c.valor_gunu == date(2026, 9, 3)       # payların çıkışı
     assert c.nakit == date(2026, 9, 4)
 
 
@@ -37,7 +44,7 @@ def test_kesim_oncesi_emir_ayni_gun_islem_gorur(takvim, hsyf):
     c = valor.cozumle(hsyf, takvim, datetime(2026, 9, 1, 11, 0), satis=True)
     assert not c.kesim_sonrasi
     assert c.islem_gunu == date(2026, 9, 1)
-    assert c.gerceklesme == date(2026, 9, 2)
+    assert c.gerceklesme == date(2026, 9, 1)
 
 
 def test_tam_kesim_saatinde_verilen_emir_kayar(takvim, hsyf):
@@ -60,7 +67,8 @@ def test_hafta_sonu_atlanir(takvim, hsyf):
     """28.08 Cuma 15:00 → T = 31.08 Pazartesi (29-30 hafta sonu)."""
     c = valor.cozumle(hsyf, takvim, datetime(2026, 8, 28, 15, 0), satis=True)
     assert c.islem_gunu == date(2026, 8, 31)
-    assert c.gerceklesme == date(2026, 9, 1)
+    assert c.gerceklesme == date(2026, 8, 31)
+    assert c.valor_gunu == date(2026, 9, 1)
 
 
 def test_tatil_gunu_verilen_emir_ilk_is_gunune_tasinir(takvim, hsyf):
@@ -78,12 +86,15 @@ def test_seri_ici_tatil_ayri_tablo_gerektirmez():
     kural = valor.kategori_kurali("Hisse Senedi Fonu")
     c = valor.cozumle(kural, tak, datetime(2026, 8, 26, 10, 0), satis=True)
     assert c.islem_gunu == date(2026, 8, 26)
-    assert c.gerceklesme == date(2026, 8, 31)      # 27-28 atlandı
-    assert c.gerceklesme_kesin
+    assert c.gerceklesme == date(2026, 8, 26)      # fiyat günü = T
+    assert c.valor_gunu == date(2026, 8, 31)       # 27-28 atlandı
+    assert c.gerceklesme_kesin and c.valor_kesin
 
 
 def test_seri_otesinde_kesinlik_dusuyor(takvim, hsyf):
-    c = valor.cozumle(hsyf, takvim, datetime(2026, 9, 1, 15, 0), satis=True)
+    """Fiyat günü artık T olduğu için kesinlik ancak T serinin ötesindeyse düşer."""
+    c = valor.cozumle(hsyf, takvim, datetime(2026, 9, 2, 15, 0), satis=True)
+    assert c.gerceklesme == date(2026, 9, 3)
     assert not c.gerceklesme_kesin        # 03.09 henüz yayımlanmadı
     assert "gerçek takvime göre hizalanacak" in " ".join(c.anlat(satis=True))
 
@@ -117,7 +128,7 @@ def test_nakit_uyusmazligi_yakalanir(takvim, hsyf):
     c = valor.cozumle(hsyf, takvim, datetime(2026, 9, 1, 11, 0), satis=True)
     assert c.nakit == date(2026, 9, 3)
     uyari = valor.nakit_uyusmazligi(c, date(2026, 9, 4))
-    assert uyari and "1 gün ileri" in uyari and "kesim saatinden sonra" in uyari
+    assert uyari and "1 gün ileri" in uyari and "kesim saatinin" in uyari
 
 
 def test_nakit_tutuyorsa_uyari_yok(takvim, hsyf):
@@ -169,7 +180,7 @@ def test_kesim_seans_gunu_olmayana_uygulanmaz(takvim, hsyf, saat):
     """
     c = valor.cozumle(hsyf, takvim, datetime(2026, 9, 5, saat, 0), satis=True)
     assert c.islem_gunu == date(2026, 9, 7)
-    assert c.gerceklesme == date(2026, 9, 8)
+    assert c.gerceklesme == date(2026, 9, 7)
     assert not c.kesim_sonrasi          # kaydırma uygulanmadı
 
 
@@ -195,5 +206,31 @@ def test_tek_gunluk_takvim(hsyf):
     tek = valor.IslemTakvimi.seriden([date(2026, 9, 1)])
     c = valor.cozumle(hsyf, tek, datetime(2026, 9, 1, 10, 0), satis=True)
     assert c.islem_gunu == date(2026, 9, 1)
-    assert c.gerceklesme == date(2026, 9, 2)     # seri ötesi, hafta içi
-    assert not c.gerceklesme_kesin
+    assert c.gerceklesme == date(2026, 9, 1)
+    assert c.valor_gunu == date(2026, 9, 2)      # seri ötesi, hafta içi
+    assert c.gerceklesme_kesin and not c.valor_kesin
+
+
+# --- anlat() metni ---------------------------------------------------------
+def test_alista_valor_satiri_yonu_dogru_yazar(takvim, hsyf):
+    """Alışta paylar emanete GİRER; satış metnini iki yönde de kullanmak yanlış."""
+    c = valor.cozumle(hsyf, takvim, datetime(2026, 9, 1, 11, 0), satis=False)
+    metin = " ".join(c.anlat(satis=False))
+    assert "emanete girdiği gün" in metin
+    assert "çıktığı" not in metin
+
+
+def test_satista_valor_satiri_cikis_der(takvim, hsyf):
+    c = valor.cozumle(hsyf, takvim, datetime(2026, 9, 1, 11, 0), satis=True)
+    assert "emanetten çıktığı gün" in " ".join(c.anlat(satis=True))
+
+
+def test_valor_sifirsa_ayri_satir_yazilmaz(takvim):
+    """T+0 fonda valör günü = işlem günü; aynı tarihi iki kez yazmak karıştırır."""
+    ppf = valor.kategori_kurali("Para Piyasası Fonu")
+    assert ppf.satis_valor == 0
+    c = valor.cozumle(ppf, takvim, datetime(2026, 9, 1, 11, 0), satis=True)
+    satirlar = c.anlat(satis=True)
+    assert c.valor_gunu == c.gerceklesme
+    assert not any(s.startswith("Valör") for s in satirlar)
+    assert any(s.startswith("Nakit (T+1)") for s in satirlar)

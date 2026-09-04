@@ -26,6 +26,9 @@
         <td class="sag">{{ fmt_units(emir.adet if emir.adet > 0 else -emir.adet) }}</td>
         <td>{{ emir.emir_zamani | replace('T', ' ') }}</td>
         <td><strong>{{ emir.gerceklesme.strftime('%d.%m.%Y') }}</strong>
+          {%- if emir.valor_gunu and emir.valor_gunu != emir.gerceklesme %}
+            <br><span class="kucuk" title="Payların emanetten çıktığı/girdiği gün; fiyatı etkilemez">valör {{ emir.valor_gunu.strftime('%d.%m.%Y') }}</span>
+          {%- endif %}
           {%- if emir.valor_supheli %}
             <br><span class="kucuk" title="Türetildiğinde valör kuralı doğrulanmamıştı">valör doğrulanmadı</span>
           {%- endif %}</td>
@@ -47,11 +50,11 @@
 <section class="kart">
   <h2>Emir ver</h2>
   <p class="aciklama">
-    <strong>Emri verdiğiniz günü</strong> girin; gerçekleşme ve nakit gününü
-    fonun valörüne göre uygulama hesaplar. TEFAS'ta satış emri, emri verdiğiniz
-    günün fiyatından gerçekleşmez — sonraki bir değerleme gününün fiyatı
-    kullanılır ve kesim saatinden (13:30) sonra verilen emir bir sonraki iş
-    gününe kayar.
+    <strong>Emri verdiğiniz günü</strong> girin; işlem, valör ve nakit gününü
+    uygulama hesaplar. Fiyat <strong>işlem gününün (T) kapanış değerlemesidir</strong>;
+    kesim saatinden (13:30) sonra verilen emirde T bir sonraki iş günüdür. Valör
+    yalnızca payların, nakit günü de paranın hareket gününü belirler — fiyata
+    dokunmazlar.
   </p>
   <form method="post" action="/emir" class="izgara">
     <label>Fon kodu
@@ -137,9 +140,10 @@
     <button type="submit" class="tam">Kaydet</button>
   </form>
   <p class="kucuk">
-    <strong>Satış valörü:</strong> TEFAS'ta satış emri, emri verdiğiniz günün fiyatından
-    gerçekleşmez — sonraki bir değerleme gününün fiyatı kullanılır. Buraya emrin
-    <em>gerçekleştiği</em> günü ve fiyatı yazın; paranın hesaba geçtiği tarihi değil.
+    <strong>Hangi gün?</strong> Fiyat işlem gününün (T) kapanış değerlemesidir; kesim
+    saatinden (13:30) sonra verilen emirde T bir sonraki iş günüdür. Buraya işlem
+    gününü ve o günün fiyatını yazın — payların emanetten çıktığı valör gününü de,
+    paranın hesaba geçtiği günü de değil.
   </p>
 </section>
 

@@ -35,7 +35,13 @@ from .valor import Cozum, IslemTakvimi
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
+# Surum 2: `gerceklesme` artik ISLEM GUNUDUR. Surum 1'de o alan
+# `islem_gunu + valor` ile yazilmisti ve `coz` onu oldugu gibi fiyat gunu diye
+# okurdu - yani eski bir emir valor gununun fiyatindan islenirdi (bkz. valor.py
+# docstring'i: bu kayma 69.991 adetlik bir satista 28.820,61 TL'ye mal oldu).
+# Dosya icerigine bakarak ayirt edilemez, o yuzden surumle isaretleniyor ve
+# `_surum2ye_tasi` ile YUKLENIRKEN cevriliyor; yalnizca uyarmak yetmezdi.
+SCHEMA_VERSION = 2
 
 
 class BekleyenHatasi(RuntimeError):
@@ -51,9 +57,14 @@ class BekleyenEmir:
     adet: float                  # isaretli: satis negatif
     emir_zamani: str             # ISO; saat varsa iceriyor
     islem_gunu: date             # T
-    gerceklesme: date            # fiyatin alinacagi degerleme gunu
+    gerceklesme: date            # fiyatin alinacagi degerleme gunu (= islem gunu)
     nakit: date                  # nakit gunu (bilgi + mutabakat icin)
     tarih_kaynagi: str           # "turetildi" | "elle"
+    # Paylarin emanete girdigi/ciktigi gun (T+valor). Fiyata DOKUNMAZ; burada
+    # tutuluyor cunku emir kaydedildikten sonra kullanicinin gorebilecegi tek
+    # yer burasi ve "paylar neden hala hesabimda" sorusunun cevabi bu tarih.
+    # Surum 1 dosyalarinda yok: None gelir.
+    valor_gunu: date | None = None
     valor_supheli: bool = False
     # Araci kurumun gosterdigi gerceklesme fiyati. Verilirse TEFAS fiyati
     # yerine BU kullanilir: komisyon/yuvarlama farkinda dogru olan odur.
@@ -75,6 +86,8 @@ class BekleyenEmir:
             "tarih_kaynagi": self.tarih_kaynagi,
             "valor_supheli": self.valor_supheli,
         }
+        if self.valor_gunu is not None:
+            payload["valor_gunu"] = self.valor_gunu.isoformat()
         if self.fiyat is not None:
             payload["fiyat"] = self.fiyat
         return payload
@@ -91,6 +104,8 @@ class BekleyenEmir:
                 gerceklesme=parse_date(raw["gerceklesme"]),
                 nakit=parse_date(raw["nakit"]),
                 tarih_kaynagi=str(raw.get("tarih_kaynagi", "elle")),
+                valor_gunu=(parse_date(raw["valor_gunu"])
+                            if raw.get("valor_gunu") else None),
                 valor_supheli=bool(raw.get("valor_supheli", False)),
                 fiyat=float(raw["fiyat"]) if raw.get("fiyat") is not None else None,
             )
@@ -99,9 +114,13 @@ class BekleyenEmir:
 
     def ozet(self) -> str:
         tur = "Satış" if self.satis_mi else "Alış"
+        valor = ""
+        if self.valor_gunu is not None and self.valor_gunu != self.gerceklesme:
+            valor = f" · valör {self.valor_gunu:%d.%m.%Y}"
         return (
             f"{self.kod}: {tur} {fmt_units(abs(self.adet))} adet · "
-            f"gerçekleşme {self.gerceklesme:%d.%m.%Y} · nakit {self.nakit:%d.%m.%Y}"
+            f"gerçekleşme (fiyat günü) {self.gerceklesme:%d.%m.%Y}{valor} · "
+            f"nakit {self.nakit:%d.%m.%Y}"
         )
 
 
@@ -117,6 +136,7 @@ def emir_olustur(
         emir_zamani=emir_zamani.isoformat(),
         islem_gunu=cozum.islem_gunu,
         gerceklesme=cozum.gerceklesme,
+        valor_gunu=cozum.valor_gunu,
         nakit=cozum.nakit,
         tarih_kaynagi=tarih_kaynagi,
         valor_supheli=cozum.supheli,
@@ -337,7 +357,44 @@ def yukle(path: Path | None = None) -> list[BekleyenEmir]:
     kayitlar = ham.get("emirler") if isinstance(ham, dict) else None
     if not isinstance(kayitlar, list):
         raise BekleyenHatasi(f"Bekleyen emir dosyası beklenen biçimde değil: {path}")
+
+    surum = ham.get("surum")
+    if not isinstance(surum, int):
+        surum = 1                      # damgasiz dosya = surum 1 (elle duzenlenmis)
+    if surum > SCHEMA_VERSION:
+        logger.warning(
+            "Bekleyen emir dosyası daha yeni bir sürümden (%s > %s); "
+            "tanınmayan alanlar yok sayılacak.", surum, SCHEMA_VERSION,
+        )
+    elif surum < SCHEMA_VERSION:
+        kayitlar = [_surum2ye_tasi(item) for item in kayitlar]
+        if kayitlar:
+            logger.info(
+                "Bekleyen emir dosyası sürüm %s'den %s'e taşındı: fiyat günü "
+                "işlem gününe alındı, eski gerçekleşme günü valör günü olarak "
+                "kaydedildi.", surum, SCHEMA_VERSION,
+            )
     return [BekleyenEmir.from_dict(item) for item in kayitlar]
+
+
+def _surum2ye_tasi(raw: dict) -> dict:
+    """Surum 1 kaydini surum 2 anlamina cevirir. KAYIPSIZ.
+
+    Surum 1'de `gerceklesme` = `islem_gunu + valor` yazilirdi ve fiyat oradan
+    alinirdi; surum 2'de fiyat gunu islem gunudur (bkz. valor.py docstring'i).
+    Iki alan da diskte durdugu icin donusum tam: eski `gerceklesme` aslinda
+    valor gunuydu, dogru fiyat gunu ise zaten yazili olan `islem_gunu`.
+
+    Bunu SADECE uyarip birakmak yetmezdi: uyari dosyadaki surum damgasina
+    bakiyordu, ilk `kaydet` cagrisi damgayi 2 yapip kaydin kendisini eski
+    birakiyordu ve emir bir daha uyarmadan yanlis gunun fiyatindan islenirdi.
+    """
+    if not isinstance(raw, dict) or "islem_gunu" not in raw:
+        return raw                     # bozuk kayit: from_dict anlamli hata versin
+    tasinmis = dict(raw)
+    tasinmis["valor_gunu"] = raw.get("gerceklesme")
+    tasinmis["gerceklesme"] = raw["islem_gunu"]
+    return tasinmis
 
 
 def kaydet(emirler: list[BekleyenEmir], path: Path | None = None) -> Path:

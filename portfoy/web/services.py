@@ -345,8 +345,11 @@ class PortfoyServisi:
         cozum, history = self.emir_cozumle(kod, satis, emir_zamani, kesim_sonrasi)
 
         # Mutabakat: nakit tarihi turetilen zincirin dogrulanabilir tek ucudur.
-        # Tutmuyorsa gerceklesme gunu de kaymistir; kaydetmeden once durduruyoruz
-        # cunku yanlis gun dogrudan paraya dokunur.
+        # Tutmuyorsa ya nakit kurali ya emir saati yanlistir. Ikincisi ISLEM
+        # GUNUNU, dolayisiyla FIYAT gununu kaydirir; birincisi fiyata dokunmaz
+        # ama zincirin dogrulanmis tek ucunu curutur. Iki halde de kaydetmeden
+        # once duruyoruz: dogrulanmamis bir zinciri sessizce yazmak, hatanin
+        # aylar sonra fark edilmesi demekti.
         uyusmazlik = valor.nakit_uyusmazligi(cozum, beklenen_nakit)
         if uyusmazlik:
             raise ServisHatasi(uyusmazlik)

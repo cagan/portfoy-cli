@@ -358,19 +358,30 @@ silmek isterseniz `remove CODE`.
 
 ### Satışın valörü ve emir kaydı
 
-TEFAS'ta satış emri, emrin verildiği günün fiyatından **gerçekleşmez**. Zincir
-şöyle işler:
+Kesim saatinden (13:30) sonra verilen satış emri, emrin verildiği günün
+fiyatından **gerçekleşmez**: bir sonraki iş gününe kayar. Zincir şöyle işler:
 
 ```
-Emir (01.09 15:00)
+Emir (01.09 18:22)
   └─ kesim 13:30'dan sonra → işlem günü T = 02.09 (bir sonraki iş günü)
-       └─ satış valörü T+1 → gerçekleşme 03.09'un değerleme fiyatından
-            └─ nakit T+2   → para 04.09'da hesapta
+       └─ FİYAT = 02.09 kapanış değerlemesi  ← burada kilitlenir
+            └─ satış valörü T+1 → paylar 03.09'da emanetten çıkar
+                 └─ nakit T+2   → para 04.09'da hesapta
 ```
 
-Yani **emri verdiğiniz an fiyat sabitlenmez**; gerçekleşme gününün kapanış
-değerlemesine kadar fonu fiilen taşırsınız. Bir gün kayma, o günün tüm fiyat
-hareketini yanlış tarafa yazar.
+**Valör fiyat gününü kaydırmaz.** Fiyat işlem gününün kapanışında kilitlenir;
+valör yalnızca payların, `nakit` ise paranın hareket gününü belirler. İşlem günü
+kapanışından sonra fiyat riski taşımazsınız — fonun sonraki günlerde ne yaptığı
+sizi etkilemez.
+
+Bu ayrım kâğıt üstünde değil: 01.09.2026 18:22'de verilen PHE satış emri işlem
+günü 02.09'a bağlandı ve 02.09 kapanışından (3,230415) gerçekleşti; 69.991 adet
+için 226.099,98 ₺. Kod bir dönem fiyatı valör gününden (03.09, 2,818639) alıyordu
+ve aynı işlemi 197.279,36 ₺ yazıyordu — 28.820,61 ₺'lik sahte kayıp. Fon o iki
+günde sert düştüğü için bir günlük kayma doğrudan paraya dönüştü.
+
+Taşıdığınız gerçek risk **emri verdiğiniz an ile işlem günü kapanışı arasındadır**;
+kesim sonrası verilen emirde bu pencere bir günü aşar.
 
 Bu aritmetiği kafanızda yapmayın — `emir` komutu yapar:
 
@@ -384,10 +395,12 @@ yanıltan senaryonun ta kendisidir.
 
 `--nakit` isteğe bağlıdır ama girin: aracı kurum ekranındaki nakit tarihi,
 türetilen zincirin **doğrulanabilir tek ucudur**. Tutmuyorsa emir kaydedilmez
-ve sebebi söylenir (ya emir saati ya valör kuralı yanlış).
+ve sebebi söylenir (ya emir saati ya nakit kuralı yanlış; ikisinden yalnızca
+emir saati fiyat gününü kaydırır).
 
 Gerçekleşme gününü ve fiyatını zaten biliyorsanız `emir` yerine
-`add ... --accumulate` kullanın; orada valör hesabı yapılmaz.
+`add ... --accumulate` kullanın; orada valör hesabı yapılmaz — yazdığınız gün
+işlem günü, yazdığınız fiyat da o günün kapanış değerlemesi sayılır.
 
 ### Bekleyen emirler
 

@@ -1,9 +1,18 @@
 """Fon valor kurallari: emir zamanindan gerceklesme ve nakit gununu turetir.
 
 Neden gerekli: TEFAS'ta satis emri, emrin verildigi gunun fiyatindan
-GERCEKLESMEZ. Emir once kesim saatine gore bir islem gunune baglanir (13:30'dan
-sonra verilen emir ertesi is gunune kalir), sonra fonun valorune gore ileri bir
-degerleme gununun fiyatindan islenir; nakit ondan da sonra hesaba gecer.
+GERCEKLESMEZ. Emir once kesim saatine gore bir ISLEM GUNUNE baglanir (13:30'dan
+sonra verilen emir ertesi is gunune kalir); fiyat O GUNUN kapanis degerlemesidir.
+Valor ve nakit gunleri bundan SONRA gelir ve fiyata dokunmaz.
+
+VALOR FIYAT GUNUNU KAYDIRMAZ. Bu modul bir donem tersini varsayiyordu ve
+gerceklesme gununu `islem_gunu + valor` diye hesapliyordu; 04.09.2026 tarihli
+Garanti BBVA dekontu bunu curuttu: 01.09 18:22'de (kesim sonrasi) verilen PHE
+satis emri islem gunu 02.09'a bagli, uygulanan birim fiyat 02.09 kapanisi
+(3,230415) ve nakit gunu 04.09 (T+2) idi. Kod ise fiyati 03.09'dan (2,818639)
+almisti: 69.991 adette 28.820,61 TL'lik sahte kayip. Valor yalnizca paylarin
+emanetten cikis gununu, `nakit` de paranin hesaba gectigi gunu belirler; fiyat
+islem gununde kilitlenir ve sonraki gunlerin hareketi yatirimciyi etkilemez.
 
 Bu aritmetigi kullanicinin kafasinda yapmasi, portfoyun en pahali hata
 kaynagidir: bir gun kayma, o gunun tum fiyat hareketini yanlis tarafa yazar.
@@ -76,8 +85,12 @@ class ValorHatasi(RuntimeError):
 class ValorKurali:
     """Bir fonun valor semasi. Sayilar IS GUNU cinsindendir.
 
-    `satis_valor=1` -> emir islem gunu T ise, T+1 is gununun degerleme
-    fiyatindan gerceklesir. `satis_nakit=2` -> nakit T+2'de hesaptadir.
+    `satis_valor=1` -> islem gunu T ise paylar T+1'de emanetten cikar.
+    `satis_nakit=2` -> nakit T+2'de hesaptadir.
+
+    Hicbiri FIYAT gunu degildir: fiyat her zaman T'nin kapanis degerlemesidir
+    (bkz. modul docstring'indeki dekont dogrulamasi). Bu alanlar takas
+    takvimini tarif eder; yatirimci T kapanisindan sonra fiyat riski tasimaz.
     """
 
     alis_valor: int = 1
@@ -252,7 +265,8 @@ class Cozum:
     """Emir zamanindan turetilen tarih zinciri."""
 
     islem_gunu: date          # emrin bagli oldugu is gunu (T)
-    gerceklesme: date         # fiyatin alindigi degerleme gunu
+    gerceklesme: date         # fiyatin alindigi degerleme gunu — DAIMA T
+    valor_gunu: date          # paylarin emanetten cikip girdigi gun (T+valor)
     nakit: date               # paranin hesaba gectigi gun
     kesim_sonrasi: bool       # emir kesim saatinden sonra mi verildi
     # Kesinlik AYRI izlenir: nakit gunu neredeyse her zaman serinin otesine
@@ -261,6 +275,7 @@ class Cozum:
     # kesinken de "supheli" uyarisi bastirirdi - surekli yanan bir uyari
     # okunmaz hale gelir.
     gerceklesme_kesin: bool
+    valor_kesin: bool
     nakit_kesin: bool
     kural: ValorKurali
 
@@ -281,10 +296,22 @@ class Cozum:
             f"İşlem günü (T): {self.islem_gunu:%d.%m.%Y %a}"
             + (" — emir kesim saatinden sonra verildi, ertesi iş gününe kaydı"
                if self.kesim_sonrasi else ""),
-            f"{tur} gerçekleşme (T+{v}): {self.gerceklesme:%d.%m.%Y %a} "
-            f"— bu günün değerleme fiyatı kullanılır",
-            f"Nakit (T+{n}): {self.nakit:%d.%m.%Y %a}",
+            f"{tur} gerçekleşme (T): {self.gerceklesme:%d.%m.%Y %a} "
+            f"— bu günün kapanış değerlemesi kullanılır, fiyat burada kilitlenir",
         ]
+        # T+0 fonlarda (para piyasasi) valor gunu islem gunuyle ayni; ayni tarihi
+        # biri "fiyati belirler" digeri "belirlemez" diyen iki satirda tekrarlamak
+        # tam da bu modulun onlemeye calistigi tarih karisikligini uretirdi.
+        if v:
+            yon = "emanetten çıktığı" if satis else "emanete girdiği"
+            satirlar.append(
+                f"Valör (T+{v}): {self.valor_gunu:%d.%m.%Y %a} "
+                f"— payların {yon} gün; fiyatı etkilemez"
+            )
+        satirlar.append(
+            f"Nakit (T+{n}): {self.nakit:%d.%m.%Y %a}"
+            + (" — işlem günüyle aynı" if n == 0 else "")
+        )
         if self.kural.supheli:
             satirlar.append(
                 f"UYARI: {self.kural.kategori or 'bu fon'} için valör kuralı "
@@ -356,15 +383,23 @@ def cozumle(
     # modulun onlemek icin var oldugu bir gunluk kaymayi uretirdi.
     kesim_uygula = sonra and takvim.seans_gunu_mu(gun)
     islem_gunu, t_kesin = takvim.ekle(gun, 1 if kesim_uygula else 0)
-    gerceklesme, g_kesin = takvim.ekle(islem_gunu, kural.valor(satis))
+    # Fiyat gunu = ISLEM GUNU. Valor buraya EKLENMEZ: fon paylari islem gununun
+    # kapanis degerlemesinden geri alir, valor yalnizca paylarin/nakdin hareket
+    # gununu kaydirir. Bir donem burada `kural.valor(satis)` ekleniyordu; dusen
+    # bir fonda bu, tek gunluk kaymayi dogrudan paraya ceviren sessiz bir hataydi
+    # (bkz. modul docstring'i).
+    gerceklesme, g_kesin = islem_gunu, t_kesin
+    valor_gunu, v_kesin = takvim.ekle(islem_gunu, kural.valor(satis))
     nakit, n_kesin = takvim.ekle(islem_gunu, kural.nakit(satis))
 
     return Cozum(
         islem_gunu=islem_gunu,
         gerceklesme=gerceklesme,
+        valor_gunu=valor_gunu,
         nakit=nakit,
         kesim_sonrasi=kesim_uygula,
-        gerceklesme_kesin=t_kesin and g_kesin,
+        gerceklesme_kesin=g_kesin,
+        valor_kesin=t_kesin and v_kesin,
         nakit_kesin=t_kesin and n_kesin,
         kural=kural,
     )
@@ -374,8 +409,9 @@ def nakit_uyusmazligi(cozum: Cozum, beklenen_nakit: date | None) -> str | None:
     """Araci kurumun gosterdigi nakit tarihiyle mutabakat.
 
     Nakit tarihi kullanicinin ekraninda GORDUGU bir olgudur; turetilen zincirin
-    tek dogrulanabilir ucu odur. Tutmuyorsa ya valor kurali ya da emir saati
-    yanlistir - ikisi de gerceklesme gununu kaydirir, yani dogrudan paraya
+    tek dogrulanabilir ucu odur. Tutmuyorsa ya `satis_nakit`/`alis_nakit`
+    yanlistir ya da emir kesim saatinin yanlis tarafina konmustur. Ikincisi
+    ISLEM GUNUNU, dolayisiyla FIYAT gununu kaydirir - yani dogrudan paraya
     dokunur. Bu kontrol olmasaydi hata ancak aylar sonra fark edilirdi.
     """
     if beklenen_nakit is None or beklenen_nakit == cozum.nakit:
@@ -384,10 +420,10 @@ def nakit_uyusmazligi(cozum: Cozum, beklenen_nakit: date | None) -> str | None:
     yon = "ileri" if fark > 0 else "geri"
     return (
         f"Türetilen nakit günü {cozum.nakit:%d.%m.%Y}, sizin girdiğiniz ise "
-        f"{beklenen_nakit:%d.%m.%Y} ({abs(fark)} gün {yon}). Bu, gerçekleşme "
-        f"gününün de kaydığı anlamına gelir. İki olası sebep: emri kesim "
-        f"saatinden sonra vermiş olabilirsiniz, ya da bu fonun valör kuralı "
-        f"({cozum.kural.kaynak}) yanlış."
+        f"{beklenen_nakit:%d.%m.%Y} ({abs(fark)} gün {yon}). İki olası sebep: "
+        f"emri kesim saatinin diğer tarafında vermiş olabilirsiniz — bu, işlem "
+        f"gününü ve dolayısıyla FİYAT gününü kaydırır — ya da bu fonun nakit "
+        f"kuralı ({cozum.kural.kaynak}) yanlış."
     )
 
 

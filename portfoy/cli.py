@@ -391,9 +391,10 @@ def cmd_emir(args) -> int:
         uyari = valor.nakit_uyusmazligi(cozum, beklenen)
         if uyari:
             print(f"\nUYUŞMAZLIK: {uyari}", file=sys.stderr)
-            print("Emir kaydedilmedi. Emir saatini düzeltin veya "
-                  f"'{console.invocation()} valor {code}' ile valör kuralını "
-                  "güncelleyin.", file=sys.stderr)
+            print("Emir kaydedilmedi. Emir saatini düzeltin (işlem gününü, "
+                  "dolayısıyla fiyat gününü kaydırır) veya "
+                  f"'{console.invocation()} valor {code}' ile fonun nakit "
+                  "kuralını güncelleyin.", file=sys.stderr)
             return EXIT_ERROR
         print("  ✓ Nakit tarihi tutuyor — türetilen zincir doğrulandı.")
 

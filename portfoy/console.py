@@ -464,7 +464,7 @@ HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     (
         "Emir ve valör",
         (
-            ("emir CODE UNITS --sat", "Satış emri; gerçekleşme gününü valörden türetir"),
+            ("emir CODE UNITS --sat", "Satış emri; işlem gününü emir saatinden türetir"),
             ("emir ... --tarih GG.AA.YYYY", "Emri verdiğiniz gün"),
             ("emir ... --saat SS:DD", "Emir saati; kesim 13:30, sonrası ertesi güne kayar"),
             ("emir ... --nakit GG.AA.YYYY", "Aracı kurumun nakit tarihi — zinciri doğrular"),

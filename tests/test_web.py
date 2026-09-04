@@ -413,13 +413,14 @@ def emir_istemci(istemci, monkeypatch):
 
 
 def test_emir_kesim_sonrasi_dogru_gunu_turetir(emir_istemci):
-    """Gerçek olay: 01.09 15:00 → T=02.09 → gerçekleşme 03.09 → nakit 04.09."""
+    """Gerçek olay: 01.09 15:00 → T=02.09 → fiyat 02.09 → valör 03.09 → nakit 04.09."""
     html = gonder(
         emir_istemci, "/emir", code="TMV", tur="satis", units="100",
         emir_tarihi="2026-09-01", saat="15:00",
     )
     assert "İşlem günü (T): 02.09.2026" in html
-    assert "gerçekleşme (T+1): 03.09.2026" in html
+    assert "gerçekleşme (T): 02.09.2026" in html
+    assert "Valör (T+1): 03.09.2026" in html
     assert "Nakit (T+2): 04.09.2026" in html
 
 
@@ -429,7 +430,8 @@ def test_emir_kesim_oncesi_ayni_gun(emir_istemci):
         emir_tarihi="2026-09-01", saat="11:00",
     )
     assert "İşlem günü (T): 01.09.2026" in html
-    assert "gerçekleşme (T+1): 02.09.2026" in html
+    assert "gerçekleşme (T): 01.09.2026" in html
+    assert "Valör (T+1): 02.09.2026" in html
 
 
 def test_emir_saat_bilinmiyorsa_taraf_secilebilir(emir_istemci):

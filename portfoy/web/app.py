@@ -666,7 +666,8 @@ def create_app(
             "bekleyen": [
                 {
                     "id": item.id, "kod": item.kod, "adet": item.adet,
-                    "gerceklesme": item.gerceklesme, "nakit": item.nakit,
+                    "gerceklesme": item.gerceklesme,
+                    "valor_gunu": item.valor_gunu, "nakit": item.nakit,
                     "valor_supheli": item.valor_supheli,
                 }
                 for item in servis.bekleyen_emirler()
