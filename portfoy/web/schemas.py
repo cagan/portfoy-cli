@@ -28,6 +28,7 @@ _EN_ESKI_ISLEM = date(2000, 1, 1)
 # yazildiginda portfoy sessizce anlamsizlasmasin.
 _MAKS_ADET = 1e12
 _MAKS_FIYAT = 1e9
+_MAKS_TUTAR = 1e12
 
 
 class IslemTuru(str, Enum):
@@ -355,7 +356,10 @@ class EmirForm(BaseModel):
 
     code: str
     tur: IslemTuru
-    units: float | str
+    # Adet ya da TL tutari; tam olarak biri. Alista aracı kurum TL ister ve
+    # adedi ancak islem gunu kapanis fiyati yayimlaninca hesaplar.
+    units: float | str | None = None
+    tutar: float | str | None = None
     emir_tarihi: str
     # Saat ZORUNLU bilgi ama iki bicimde alinabilir: acik saat, ya da kesimin
     # hangi tarafinda oldugu. "Herhalde erkendi" varsayimi yok - kesim sonrasi
@@ -375,8 +379,17 @@ class EmirForm(BaseModel):
 
     @field_validator("units", mode="before")
     @classmethod
-    def _units(cls, value) -> float:
+    def _units(cls, value):
+        if value in (None, ""):
+            return None
         return _sayi_dogrula(value, "Adet", _MAKS_ADET)
+
+    @field_validator("tutar", mode="before")
+    @classmethod
+    def _tutar(cls, value):
+        if value in (None, ""):
+            return None
+        return _sayi_dogrula(value, "Tutar", _MAKS_TUTAR)
 
     @field_validator("price", mode="before")
     @classmethod
@@ -429,6 +442,22 @@ class EmirForm(BaseModel):
         return value
 
     @model_validator(mode="after")
+    def _miktar_gerekli(self) -> "EmirForm":
+        if (self.units is None) == (self.tutar is None):
+            raise ValueError(
+                "Adet ya da TL tutarından tam olarak birini girin. Alışta "
+                "adet henüz belli değilse tutarı girin; adet, işlem günü "
+                "kapanış fiyatı yayımlanınca hesaplanır."
+            )
+        if self.tutar is not None and self.tur is IslemTuru.SATIS:
+            raise ValueError(
+                "TL tutarıyla satış emri kabul edilmiyor: adet bilinmeden "
+                "beklemedeki satış rezervesi sayılamaz ve aynı paylar iki kez "
+                "satılabilir. Satış emrini adetle girin."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _zaman_gerekli(self) -> "EmirForm":
         if self.saat is None and self.kesim_taraf is None:
             raise ValueError(
@@ -439,7 +468,9 @@ class EmirForm(BaseModel):
         return self
 
     @property
-    def signed_units(self) -> float:
+    def signed_units(self) -> float | None:
+        if self.units is None:
+            return None
         return -self.units if self.tur is IslemTuru.SATIS else self.units
 
     @property

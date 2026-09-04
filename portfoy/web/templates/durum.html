@@ -11,7 +11,7 @@
     <ul class="kucuk-liste">
     {% for emir in bekleyenler %}
       <li>{{ emir.kod }} · {{ 'satış' if emir.satis_mi else 'alış' }}
-          {{ fmt_units(emir.adet if emir.adet > 0 else -emir.adet) }} adet ·
+          {% if emir.adet is none %}{{ fmt_money(emir.tutar) }}{% else %}{{ fmt_units(emir.adet if emir.adet > 0 else -emir.adet) }} adet{% endif %} ·
           gerçekleşme <strong>{{ emir.gerceklesme.strftime('%d.%m.%Y') }}</strong></li>
     {% endfor %}
     </ul>

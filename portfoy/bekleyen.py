@@ -29,7 +29,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from . import config, storage
-from .formatting import fmt_price, fmt_units
+from .formatting import fmt_money, fmt_price, fmt_units
 from .storage import EPSILON, Portfolio, StorageError, normalize_code, parse_date
 from .valor import Cozum, IslemTakvimi
 
@@ -54,7 +54,13 @@ class BekleyenEmir:
 
     id: str
     kod: str
-    adet: float                  # isaretli: satis negatif
+    # Emir ya ADETLE ya TUTARLA verilir; ikisi de isaretlidir (satis negatif).
+    # Alista aracı kurum TL ister ve adedi ancak islem gunu kapanis fiyati
+    # yayimlaninca hesaplar - biz de oyle yapiyoruz: `adet = tutar / fiyat`,
+    # ayni fiyattan, ek varsayim girmeden. Tam da bu yuzden `adet` zorunlu
+    # degil: TL ile verilmis bir emirde adet HENUZ YOKTUR ve uydurmak, tahmin
+    # ile gerceklesme arasindaki farki sahte kar/zarara cevirirdi.
+    adet: float | None           # isaretli: satis negatif
     emir_zamani: str             # ISO; saat varsa iceriyor
     islem_gunu: date             # T
     gerceklesme: date            # fiyatin alinacagi degerleme gunu (= islem gunu)
@@ -69,16 +75,39 @@ class BekleyenEmir:
     # Araci kurumun gosterdigi gerceklesme fiyati. Verilirse TEFAS fiyati
     # yerine BU kullanilir: komisyon/yuvarlama farkinda dogru olan odur.
     fiyat: float | None = None
+    # TL cinsinden emir tutari (isaretli). SATISTA KABUL EDILMEZ: adet
+    # bilinmeden `bekleyen_satis_adedi` rezerveyi sayamaz ve ayni paylar iki
+    # kez satilabilirdi. Alista boyle bir risk yok - eldeki adede dokunmuyor.
+    tutar: float | None = None
+
+    def __post_init__(self) -> None:
+        if (self.adet is None) == (self.tutar is None):
+            raise BekleyenHatasi(
+                "Emir ya adetle ya TL tutarıyla verilir; ikisinden tam olarak "
+                "birini girin."
+            )
+        if self.tutar is not None and self.tutar < 0:
+            raise BekleyenHatasi(
+                "TL tutarıyla satış emri kabul edilmiyor: adet bilinmeden "
+                "beklemedeki satış rezervesi sayılamaz ve aynı paylar iki kez "
+                "satılabilir. Satış emrini adetle girin."
+            )
 
     @property
     def satis_mi(self) -> bool:
-        return self.adet < 0
+        return self.adet is not None and self.adet < 0
+
+    @property
+    def adet_bilinmiyor(self) -> bool:
+        """TL ile verilmis emir: adet, fiyat yayimlaninca hesaplanacak."""
+        return self.adet is None
 
     def to_dict(self) -> dict:
         payload = {
             "id": self.id,
             "kod": self.kod,
             "adet": self.adet,
+            "tutar": self.tutar,
             "emir_zamani": self.emir_zamani,
             "islem_gunu": self.islem_gunu.isoformat(),
             "gerceklesme": self.gerceklesme.isoformat(),
@@ -98,7 +127,10 @@ class BekleyenEmir:
             return cls(
                 id=str(raw["id"]),
                 kod=normalize_code(raw["kod"]),
-                adet=float(raw["adet"]),
+                adet=(float(raw["adet"]) if raw.get("adet") is not None
+                      else None),
+                tutar=(float(raw["tutar"]) if raw.get("tutar") is not None
+                       else None),
                 emir_zamani=str(raw["emir_zamani"]),
                 islem_gunu=parse_date(raw["islem_gunu"]),
                 gerceklesme=parse_date(raw["gerceklesme"]),
@@ -114,25 +146,35 @@ class BekleyenEmir:
 
     def ozet(self) -> str:
         tur = "Satış" if self.satis_mi else "Alış"
+        if self.adet is None:
+            miktar = f"{fmt_money(self.tutar)} (adet fiyat gelince)"
+        else:
+            miktar = f"{fmt_units(abs(self.adet))} adet"
         valor = ""
         if self.valor_gunu is not None and self.valor_gunu != self.gerceklesme:
             valor = f" · valör {self.valor_gunu:%d.%m.%Y}"
         return (
-            f"{self.kod}: {tur} {fmt_units(abs(self.adet))} adet · "
+            f"{self.kod}: {tur} {miktar} · "
             f"gerçekleşme (fiyat günü) {self.gerceklesme:%d.%m.%Y}{valor} · "
             f"nakit {self.nakit:%d.%m.%Y}"
         )
 
 
 def emir_olustur(
-    kod: str, adet: float, cozum: Cozum, emir_zamani: datetime | date,
+    kod: str, adet: float | None, cozum: Cozum, emir_zamani: datetime | date,
     fiyat: float | None = None, tarih_kaynagi: str = "turetildi",
+    tutar: float | None = None,
 ) -> BekleyenEmir:
-    """Cozumlenmis tarih zincirinden bekleyen emir uretir."""
+    """Cozumlenmis tarih zincirinden bekleyen emir uretir.
+
+    `adet` ya da `tutar`dan tam olarak biri verilir; dogrulamayi
+    `BekleyenEmir.__post_init__` yapar.
+    """
     return BekleyenEmir(
         id=secrets.token_hex(6),
         kod=normalize_code(kod),
-        adet=float(adet),
+        adet=None if adet is None else float(adet),
+        tutar=None if tutar is None else float(tutar),
         emir_zamani=emir_zamani.isoformat(),
         islem_gunu=cozum.islem_gunu,
         gerceklesme=cozum.gerceklesme,
@@ -150,6 +192,8 @@ def emir_olustur(
 def bekleyen_satis_adedi(emirler: list[BekleyenEmir], kod: str) -> float:
     """Bir fon icin beklemedeki toplam satis adedi (pozitif)."""
     kod = normalize_code(kod)
+    # `satis_mi` adedi bilinmeyen emri zaten satis saymaz; TL ile satis
+    # kabul edilmedigi icin (bkz. __post_init__) burada bir bosluk kalmiyor.
     return sum(-e.adet for e in emirler if e.kod == kod and e.satis_mi)
 
 
@@ -187,6 +231,7 @@ class Cozulen:
     """Gerceklesmis bir emir ve nasil gerceklestigi."""
 
     emir: BekleyenEmir
+    adet: float            # gerceklesen adet; TL'li emirde tutar/fiyat ile dogar
     tarih: date            # kullanilan degerleme gunu (hizalanmis olabilir)
     fiyat: float
     fiyat_kaynagi: str     # "tefas" | "elle"
@@ -195,9 +240,14 @@ class Cozulen:
     def ozet(self) -> str:
         tur = "Satış" if self.emir.satis_mi else "Alış"
         satir = (
-            f"{self.emir.kod}: {tur} {fmt_units(abs(self.emir.adet))} adet gerçekleşti "
+            f"{self.emir.kod}: {tur} {fmt_units(abs(self.adet))} adet gerçekleşti "
             f"— {self.tarih:%d.%m.%Y} · {fmt_price(self.fiyat)} ₺"
         )
+        if self.emir.adet_bilinmiyor:
+            # Adedin nereden geldigini yazmak sart: kullanici ekranda TL girdi,
+            # portfoyde adet goruyor; ikisi arasindaki koprunun gorunmez olmasi
+            # "bu sayi nereden cikti" sorusunu doguruyordu.
+            satir += f" [{fmt_money(self.emir.tutar)} tutardan hesaplandı]"
         if self.fiyat_kaynagi == "tefas":
             satir += " (TEFAS değerleme fiyatı)"
         if self.hizalandi:
@@ -254,7 +304,7 @@ def coz(
     # Ayni fon ve ayni gun icin ALISLAR once islenir: satis once gelseydi ve
     # adet yetmeseydi `add_lot` reddeder, emir sonsuza dek beklemede kalirdi -
     # oysa alis once islense ikisi de gecerdi.
-    for emir in sorted(emirler, key=lambda e: (e.gerceklesme, e.adet < 0, e.kod)):
+    for emir in sorted(emirler, key=lambda e: (e.gerceklesme, e.satis_mi, e.kod)):
         # Portfoyde bu emirden uretilmis lot zaten varsa emir islenmis
         # demektir; portfoy yazildiktan SONRA bekleyen dosyasinin yazimi
         # basarisiz olmus olabilir. Ikinci kez uygulamak adedi yok ederdi.
@@ -285,8 +335,12 @@ def coz(
             tarih, fiyat, hizalandi = bulunan
             kaynak = "tefas"
 
+        # TL ile verilmis emirde adet BURADA dogar: bolen, lotun kaydedilecegi
+        # fiyatin ta kendisi. Emir verilirken bilinen son fiyatla bolmek, o
+        # gunler arasindaki hareketi sahte kar/zarara cevirirdi.
+        adet = emir.adet if emir.adet is not None else emir.tutar / fiyat
         try:
-            portfolio.add_lot(emir.kod, emir.adet, tarih, fiyat, emir_id=emir.id)
+            portfolio.add_lot(emir.kod, adet, tarih, fiyat, emir_id=emir.id)
         except ValueError as exc:
             # Portfoy emirden sonra elle degistirilmis olabilir: emri
             # dusurmuyoruz, kullaniciya gorunur kalsin diye bekletmeye devam.
@@ -295,7 +349,7 @@ def coz(
             continue
 
         cozulenler.append(
-            Cozulen(emir=emir, tarih=tarih, fiyat=fiyat,
+            Cozulen(emir=emir, adet=adet, tarih=tarih, fiyat=fiyat,
                     fiyat_kaynagi=kaynak, hizalandi=hizalandi)
         )
 

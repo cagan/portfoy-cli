@@ -386,8 +386,23 @@ kesim sonrası verilen emirde bu pencere bir günü aşar.
 Bu aritmetiği kafanızda yapmayın — `emir` komutu yapar:
 
 ```bash
-portfoy emir PHE 69991 --sat --tarih 01.09.2026 --saat 15:00 --nakit 04.09.2026
+portfoy emir PHE 69991 --sat --tarih 01.09.2026 --saat 18:22 --nakit 04.09.2026
 ```
+
+**Alışta adet yerine TL tutarı girin.** Aracı kurum alış emrini TL cinsinden
+alır; adet ancak işlem gününün kapanış fiyatı yayımlanınca belli olur. Bu yüzden
+alışta `--tutar` kullanılır ve adet, emir çözülürken `tutar ÷ işlem günü fiyatı`
+olarak hesaplanır — lotun kaydedileceği fiyatın ta kendisiyle, ek varsayım
+girmeden:
+
+```bash
+portfoy emir THF --al --tutar 226000 --tarih 04.09.2026 --saat 17:01 --nakit 08.09.2026
+```
+
+Adet bilinmediği sürece emir portföye **girmez** (alışta doğrusu bu: henüz
+payınız yok, yalnızca paranız taahhüt edilmiş). Satışta `--tutar` kabul
+edilmez: adet bilinmeden beklemedeki satış rezervesi sayılamaz ve aynı paylar
+iki kez satılabilirdi.
 
 `--saat` bilinmiyorsa `--kesim-oncesi` / `--kesim-sonrasi` kullanın. Saat
 **zorunludur**: "herhalde erkendi" varsayımı, bu aracı en pahalı şekilde

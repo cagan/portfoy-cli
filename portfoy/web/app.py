@@ -337,7 +337,8 @@ def create_app(
         request: Request,
         code: str = Form(...),
         tur: str = Form(...),
-        units: str = Form(...),
+        units: str = Form(""),
+        tutar: str = Form(""),
         emir_tarihi: str = Form(...),
         saat: str = Form(""),
         kesim_taraf: str = Form(""),
@@ -346,7 +347,7 @@ def create_app(
     ):
         form, yonlendir = formu_isle(
             request, schemas.EmirForm,
-            {"code": code, "tur": tur, "units": units,
+            {"code": code, "tur": tur, "units": units, "tutar": tutar,
              "emir_tarihi": emir_tarihi, "saat": saat,
              "kesim_taraf": kesim_taraf, "nakit_tarihi": nakit_tarihi,
              "price": price},
@@ -371,6 +372,7 @@ def create_app(
             ozet, aciklama = servis.emir_ekle(
                 form.code, form.signed_units, emir_zamani, kesim_sonrasi,
                 beklenen_nakit=form.parsed_nakit, fiyat=form.price,
+                tutar=form.tutar,
             )
             bildir(request, "basari", ozet)
             for satir in aciklama:

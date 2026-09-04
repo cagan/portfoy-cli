@@ -23,7 +23,14 @@
       <tr>
         <td><strong>{{ emir.kod }}</strong></td>
         <td>{{ 'Satış' if emir.satis_mi else 'Alış' }}</td>
-        <td class="sag">{{ fmt_units(emir.adet if emir.adet > 0 else -emir.adet) }}</td>
+        <td class="sag">
+          {%- if emir.adet is none -%}
+            {{ fmt_money(emir.tutar) }}
+            <br><span class="kucuk" title="Adet, işlem günü kapanış fiyatı yayımlanınca hesaplanacak">adet fiyat gelince</span>
+          {%- else -%}
+            {{ fmt_units(emir.adet if emir.adet > 0 else -emir.adet) }}
+          {%- endif -%}
+        </td>
         <td>{{ emir.emir_zamani | replace('T', ' ') }}</td>
         <td><strong>{{ emir.gerceklesme.strftime('%d.%m.%Y') }}</strong>
           {%- if emir.valor_gunu and emir.valor_gunu != emir.gerceklesme %}
@@ -67,7 +74,12 @@
       </select>
     </label>
     <label>Adet
-      <input name="units" type="number" step="any" min="0" required>
+      <input name="units" type="number" step="any" min="0">
+      <span class="ipucu">Satışta zorunlu</span>
+    </label>
+    <label>TL tutarı
+      <input name="tutar" type="number" step="any" min="0" placeholder="226000">
+      <span class="ipucu">Alışta adet belli değilse; adet, işlem günü kapanış fiyatı yayımlanınca hesaplanır</span>
     </label>
     <label>Emir günü
       <input name="emir_tarihi" type="date" max="{{ bugun }}" required>

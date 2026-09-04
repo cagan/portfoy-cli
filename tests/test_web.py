@@ -656,3 +656,41 @@ def test_akis_isareti_ve_kolon_aciklamasi_sayfada(istemci, ornek_portfoy):
     assert config.COLUMN_BASIS_NOTE in durum
     assert config.FLOW_MARK_NOTE in durum
     assert config.TOTAL_BASIS_NOTE in durum
+
+
+def test_emir_tl_tutariyla_alis_kabul_edilir(emir_istemci):
+    """Alışta adet henüz yoktur; TL ile emir girilebilmeli."""
+    # 02.09 17:01 → işlem günü 03.09, serinin ötesinde: fiyat henüz yayımlanmadı.
+    html = gonder(
+        emir_istemci, "/emir", code="THF", tur="alis", tutar="226000",
+        emir_tarihi="2026-09-02", saat="17:01",
+    )
+    assert "226.000,00 ₺ (adet fiyat gelince)" in html
+    assert "÷ kapanış fiyatı olarak hesaplanacak" in html
+    assert "portföyde kalır" not in html      # alışta paylar henüz yok
+
+
+def test_emir_tl_tutariyla_satis_reddedilir(emir_istemci):
+    """Adet bilinmeden bekleyen satış rezervesi sayılamaz."""
+    html = gonder(
+        emir_istemci, "/emir", code="THF", tur="satis", tutar="1000",
+        emir_tarihi="2026-09-01", saat="11:00",
+    )
+    assert "satış emri kabul edilmiyor" in html
+
+
+def test_emir_adet_ve_tutar_birlikte_reddedilir(emir_istemci):
+    html = gonder(
+        emir_istemci, "/emir", code="THF", tur="alis", units="10", tutar="1000",
+        emir_tarihi="2026-09-01", saat="11:00",
+    )
+    assert "tam olarak birini girin" in html
+
+
+def test_emir_adet_de_tutar_da_bos_reddedilir(emir_istemci):
+    html = gonder(
+        emir_istemci, "/emir", code="THF", tur="alis",
+        emir_tarihi="2026-09-01", saat="11:00",
+    )
+    assert "tam olarak birini girin" in html
+

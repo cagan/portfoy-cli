@@ -335,11 +335,27 @@ def _valor_takvimi_ve_kural(code: str, args) -> tuple:
 
 def cmd_emir(args) -> int:
     """Emir zamanindan gerceklesme gununu turetip bekleyen emir olusturur."""
+    satis_yonu = bool(args.sat)
+    if (args.units is None) == (args.tutar is None):
+        print("Hata: Adet ya da --tutar'dan tam olarak birini girin. Alışta "
+              "aracı kurum TL ister ve adedi işlem günü fiyatı yayımlanınca "
+              "hesaplar; o durumda --tutar kullanın.", file=sys.stderr)
+        return EXIT_ERROR
+    if args.tutar is not None and satis_yonu:
+        print("Hata: TL tutarıyla satış emri kabul edilmiyor. Adet bilinmeden "
+              "beklemedeki satış rezervesi sayılamaz ve aynı paylar iki kez "
+              "satılabilir; satış emrini adetle girin.", file=sys.stderr)
+        return EXIT_ERROR
+    if (args.units is not None and args.units <= 0) or (
+            args.tutar is not None and args.tutar <= 0):
+        print("Hata: Adet/tutar pozitif olmalı; yönü --sat/--al belirler.",
+              file=sys.stderr)
+        return EXIT_ERROR
     portfolio = _load_portfolio(args)
     try:
         code = storage.normalize_code(args.code)
-        if args.units <= 0:
-            raise ValueError("Adet sıfırdan büyük olmalı; yön için --sat / --al.")
+        # Adet/tutar pozitifligi ve "tam olarak biri" kurali fonksiyonun
+        # basinda dogrulandi; buraya None gelmis olamaz.
         emir_gunu = storage.parse_date(args.date)
 
         # Saat ZORUNLU (ya acik saat ya da kesim tarafı). "Herhalde erkendi"
@@ -375,7 +391,9 @@ def cmd_emir(args) -> int:
         return EXIT_ERROR
 
     tur = "SATIŞ" if satis else "ALIŞ"
-    print(f"\n{code} · {tur} · {fmt_units(args.units)} adet")
+    miktar = (f"{fmt_units(args.units)} adet" if args.units is not None
+              else f"{fmt_money(args.tutar)} (adet fiyat gelince)")
+    print(f"\n{code} · {tur} · {miktar}")
     print(f"Emir: {emir_gunu:%d.%m.%Y}" + (f" {args.saat}" if args.saat else ""))
     for satir in cozum.anlat(satis=satis):
         print(f"  {satir}")
@@ -404,8 +422,9 @@ def cmd_emir(args) -> int:
         if satis:
             bekleyen.satis_dogrula(portfolio, emirler, code, args.units)
         emir = bekleyen.emir_olustur(
-            code, -args.units if satis else args.units, cozum, emir_zamani,
-            fiyat=args.price,
+            code,
+            None if args.units is None else (-args.units if satis else args.units),
+            cozum, emir_zamani, fiyat=args.price, tutar=args.tutar,
         )
         emirler.append(emir)
         yol = bekleyen.kaydet(emirler, yollar["bekleyen"])
@@ -417,7 +436,12 @@ def cmd_emir(args) -> int:
     if cozum.gerceklesme > history.latest_date:
         print(f"  {cozum.gerceklesme:%d.%m.%Y} değerleme fiyatı yayımlandığında "
               "işlem kaydına dönüşecek.")
-        print(f"  Adetler o güne kadar portföyde kalır — fiyat riski sizde.")
+        if args.tutar is not None:
+            # Alista adet HENUZ YOK; "portfoyde kalir" demek yanlis olurdu.
+            print(f"  Adet o gün {fmt_money(args.tutar)} ÷ kapanış fiyatı "
+                  "olarak hesaplanacak; o güne kadar portföye girmez.")
+        elif satis:
+            print("  Adetler o güne kadar portföyde kalır — fiyat riski sizde.")
     return EXIT_OK
 
 
@@ -830,7 +854,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Emir zamanından gerçekleşme gününü türetip bekleyen emir oluştur.",
     )
     p_emir.add_argument("code", help="Fon kodu")
-    p_emir.add_argument("units", type=float, help="Adet (pozitif; yön için --sat/--al)")
+    p_emir.add_argument("units", type=float, nargs="?",
+                        help="Adet (pozitif; yön için --sat/--al). "
+                             "Alışta bilinmiyorsa --tutar kullanın.")
+    p_emir.add_argument("--tutar", type=float, metavar="TL",
+                        help="Adet yerine TL tutarı (yalnızca alış). Adet, "
+                             "işlem günü fiyatı yayımlanınca hesaplanır.")
     yon = p_emir.add_mutually_exclusive_group(required=True)
     yon.add_argument("--sat", action="store_true", help="Satış emri")
     yon.add_argument("--al", action="store_true", help="Alış emri")

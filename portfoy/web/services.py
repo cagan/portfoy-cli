@@ -28,7 +28,7 @@ from pathlib import Path
 
 from .. import (analytics, bekleyen, charts, config, excel_report, mailer,
                 snapshots, storage, tefas_client, valor)
-from ..formatting import fmt_units
+from ..formatting import fmt_money, fmt_units
 from ..storage import Portfolio, StorageError
 
 logger = logging.getLogger(__name__)
@@ -337,11 +337,16 @@ class PortfoyServisi:
         return cozum, history
 
     def emir_ekle(
-        self, kod: str, signed_units: float, emir_zamani, kesim_sonrasi,
+        self, kod: str, signed_units: float | None, emir_zamani, kesim_sonrasi,
         beklenen_nakit=None, fiyat: float | None = None,
+        tutar: float | None = None,
     ) -> tuple[str, list[str]]:
-        """Bekleyen emir olusturur. Doner: (ozet, aciklama satirlari)."""
-        satis = signed_units < 0
+        """Bekleyen emir olusturur. Doner: (ozet, aciklama satirlari).
+
+        `signed_units` ya da `tutar`dan biri verilir; TL ile verilen emirde adet
+        islem gunu fiyati yayimlaninca hesaplanir (bkz. bekleyen.coz).
+        """
+        satis = signed_units is not None and signed_units < 0
         cozum, history = self.emir_cozumle(kod, satis, emir_zamani, kesim_sonrasi)
 
         # Mutabakat: nakit tarihi turetilen zincirin dogrulanabilir tek ucudur.
@@ -361,7 +366,8 @@ class PortfoyServisi:
                 if satis:
                     bekleyen.satis_dogrula(portfolio, emirler, kod, -signed_units)
                 emir = bekleyen.emir_olustur(
-                    kod, signed_units, cozum, emir_zamani, fiyat=fiyat
+                    kod, signed_units, cozum, emir_zamani, fiyat=fiyat,
+                    tutar=tutar,
                 )
                 emirler.append(emir)
                 bekleyen.kaydet(emirler, self.pending_file)
@@ -372,11 +378,20 @@ class PortfoyServisi:
         if beklenen_nakit is not None:
             aciklama.append("✓ Nakit tarihi tutuyor — türetilen zincir doğrulandı.")
         if cozum.gerceklesme > history.latest_date:
-            aciklama.append(
-                f"{cozum.gerceklesme:%d.%m.%Y} değerleme fiyatı yayımlandığında "
-                f"işlem kaydına dönüşecek. Adetler o güne kadar portföyde kalır "
-                f"— fiyat riski sizde."
-            )
+            if tutar is not None:
+                # Alista adet HENUZ YOK; "portfoyde kalir" demek yanlis olurdu.
+                aciklama.append(
+                    f"{cozum.gerceklesme:%d.%m.%Y} değerleme fiyatı "
+                    f"yayımlandığında işlem kaydına dönüşecek. Adet o gün "
+                    f"{fmt_money(tutar)} ÷ kapanış fiyatı olarak hesaplanacak; "
+                    f"o güne kadar portföye girmez."
+                )
+            else:
+                aciklama.append(
+                    f"{cozum.gerceklesme:%d.%m.%Y} değerleme fiyatı yayımlandığında "
+                    f"işlem kaydına dönüşecek. Adetler o güne kadar portföyde kalır "
+                    f"— fiyat riski sizde."
+                )
         return emir.ozet(), aciklama
 
     def emir_sil(self, emir_id: str) -> str:

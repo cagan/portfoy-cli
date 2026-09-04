@@ -337,3 +337,78 @@ def test_bos_eski_dosya_gurultu_uretmez(tmp_path, caplog):
     with caplog.at_level("INFO"):
         assert bekleyen.yukle(yol) == []
     assert "taşındı" not in caplog.text
+
+
+# --- TL tutarıyla emir (alış) ----------------------------------------------
+@pytest.fixture
+def tutar_emri(takvim):
+    """04.09 17:01'de verilen TL'li alış emri → işlem günü 07.09."""
+    cozum = valor.cozumle(
+        valor.kategori_kurali("Hisse Senedi Fonu"), takvim,
+        datetime(2026, 9, 1, 15, 0), satis=False,
+    )
+    return bekleyen.emir_olustur("THF", None, cozum,
+                                 datetime(2026, 9, 1, 15, 0), tutar=226000.0)
+
+
+def test_tutarli_emirde_adet_fiyat_gelince_dogar(tutar_emri):
+    """Alışta adet HENÜZ YOKTUR; tutar ÷ işlem günü fiyatı ile hesaplanır."""
+    pf = Portfolio()
+    h = gecmis("THF", {date(2026, 9, 1): 2.75, date(2026, 9, 2): 2.825})
+    cozulen, kalan = bekleyen.coz([tutar_emri], pf, {"THF": h})
+
+    assert kalan == [] and len(cozulen) == 1
+    assert cozulen[0].fiyat == pytest.approx(2.825)
+    assert cozulen[0].adet == pytest.approx(226000.0 / 2.825)
+    assert pf.position("THF").units == pytest.approx(226000.0 / 2.825)
+    assert "tutardan hesaplandı" in cozulen[0].ozet()
+
+
+def test_tutarli_emir_fiyat_yayimlanmadan_portfoye_girmez(tutar_emri):
+    """Adedi uydurmak, tahmin ile gerçekleşme farkını sahte kâr/zarara çevirirdi."""
+    pf = Portfolio()
+    h = gecmis("THF", {date(2026, 8, 31): 2.70, date(2026, 9, 1): 2.75})
+    cozulen, kalan = bekleyen.coz([tutar_emri], pf, {"THF": h})
+
+    assert cozulen == [] and len(kalan) == 1
+    assert pf.positions == {}
+
+
+def test_tutarli_emir_diske_yazilip_okunur(tmp_path, tutar_emri):
+    yol = tmp_path / "bekleyen.json"
+    bekleyen.kaydet([tutar_emri], yol)
+
+    geri = bekleyen.yukle(yol)[0]
+    assert geri.adet is None and geri.adet_bilinmiyor
+    assert geri.tutar == pytest.approx(226000.0)
+    assert not geri.satis_mi
+    assert "226.000,00 ₺" in geri.ozet() and "adet fiyat gelince" in geri.ozet()
+
+
+def test_tutarla_satis_kabul_edilmez(takvim):
+    """Adet bilinmeden bekleyen satış rezervesi sayılamaz — çift satış riski."""
+    cozum = valor.cozumle(
+        valor.kategori_kurali("Hisse Senedi Fonu"), takvim,
+        datetime(2026, 9, 1, 11, 0), satis=True,
+    )
+    with pytest.raises(bekleyen.BekleyenHatasi, match="satış emri kabul edilmiyor"):
+        bekleyen.emir_olustur("THF", None, cozum,
+                              datetime(2026, 9, 1, 11, 0), tutar=-1000.0)
+
+
+def test_adet_ve_tutar_birlikte_verilemez(takvim):
+    cozum = valor.cozumle(
+        valor.kategori_kurali("Hisse Senedi Fonu"), takvim,
+        datetime(2026, 9, 1, 11, 0), satis=False,
+    )
+    with pytest.raises(bekleyen.BekleyenHatasi, match="tam olarak birini"):
+        bekleyen.emir_olustur("THF", 100, cozum,
+                              datetime(2026, 9, 1, 11, 0), tutar=1000.0)
+    with pytest.raises(bekleyen.BekleyenHatasi, match="tam olarak birini"):
+        bekleyen.emir_olustur("THF", None, cozum, datetime(2026, 9, 1, 11, 0))
+
+
+def test_tutarli_emir_bekleyen_satis_adedini_etkilemez(portfoy, emir, tutar_emri):
+    """Alış emri rezerve üretmez; satış korumasının tabanını bozmamalı."""
+    assert bekleyen.bekleyen_satis_adedi([emir, tutar_emri], "PHE") == 1000
+    assert bekleyen.bekleyen_satis_adedi([tutar_emri], "THF") == 0
