@@ -22,6 +22,7 @@ import pandas as pd
 import requests
 
 from . import config
+from .storage import normalize_code
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,63 @@ class FundHistory:
 # --------------------------------------------------------------------------
 def _cache_path(code: str, start: date, end: date) -> Path:
     return config.CACHE_DIR / f"{code}_{start:%Y%m%d}_{end:%Y%m%d}.json"
+
+
+def _to_valuation_dates(frame: pd.DataFrame, code: str) -> pd.DataFrame:
+    """TEFAS'in ilan tarihlerini fiyatin gercekte ait oldugu gune cevirir.
+
+    TEFAS bir fonun D gunune ait birim pay degerini D+1'de yayimlar ama kaydi
+    yayim gunuyle etiketler. Aracı kurum ekraninda 13.08'de 9,100513'ten alinan
+    fon, TEFAS verisinde "14.08 -> 9,100513" olarak gorunur. Etiketi oldugu gibi
+    kullanmak butun tarih karsilastirmalarini bir gun kaydirir: `_price_asof`
+    alis gunune ait fiyat yerine bir onceki gunun fiyatini taban alir ve getiriyi
+    oldugundan yuksek gosterir.
+
+    Duzeltme takvimle degil seriyle yapilir: her fiyat, serideki bir onceki
+    yayim gunune tasinir. TEFAS her is gunu kayit urettigi icin bu gun tam olarak
+    o fiyatin degerleme gunudur; hafta sonlari ve resmi tatiller kendiliginden
+    dogru atlanir, ayri bir tatil takvimi tutmaya gerek kalmaz.
+
+    En eski kayit tabanini kaybeder (ondan onceki yayim gunu elimizde yok) ve
+    dusurulur; `config.LOOKBACK_DAYS` penceresi bunu karsilayacak kadar genis.
+    Seride bir yayim gunu eksikse (fon o gun fiyat aciklamamissa) o fiyat bir gun
+    erkene etiketlenir - yine de sistematik +1 kaymadan iyidir.
+    """
+    if len(frame) < 2:
+        raise TefasError(
+            f"{code}: degerleme gunu belirlemek icin en az iki fiyat kaydi gerekiyor"
+        )
+    shifted = frame.copy()
+    shifted["date"] = frame["date"].shift(1)
+    return shifted.dropna(subset=["date"])
+
+
+# Fon kunyesi ucu. Valor BURADA DA YOK - donen 11 alan icinde alis/satis
+# valoru bulunmuyor (kontrol edildi). Yalnizca `fonKategori` icin cagriliyor:
+# valor tablosunun kategori varsayilanini secmesi ona bagli.
+_TEFAS_INFO_URL = "https://www.tefas.gov.tr/api/funds/fonBilgiGetir"
+
+
+def fetch_category(code: str) -> str:
+    """Fonun TEFAS kategorisi ('Hisse Senedi Fonu' gibi); bulunamazsa bos.
+
+    Basarisizlik sessizdir: kategori yalnizca valor VARSAYILANINI secmeye
+    yariyor ve varsayilan zaten "supheli" isaretli. Bir ag hatasinin fon
+    eklemeyi engellemesi orantisiz olurdu.
+    """
+    try:
+        response = requests.post(
+            _TEFAS_INFO_URL,
+            json={"fonKodu": normalize_code(code), "dil": "TR"},
+            headers={"User-Agent": _USER_AGENT, "Content-Type": "application/json"},
+            timeout=config.HTTP_TIMEOUT,
+        )
+        response.raise_for_status()
+        rows = response.json().get("resultList") or []
+    except (requests.RequestException, ValueError, AttributeError) as exc:
+        logger.debug("%s: kategori alinamadi: %s", code, exc)
+        return ""
+    return str(rows[0].get("fonKategori", "")) if rows else ""
 
 
 def _read_cache(path: Path) -> pd.DataFrame | None:
@@ -247,6 +305,10 @@ def fetch_history(
     frame = frame[frame["price"] > 0]
     if frame.empty:
         raise TefasError(f"{code}: gecerli fiyat kaydi bulunamadi")
+
+    # Onbellek TEFAS'in ham etiketleriyle yazilir; kaydirma her zaman okumadan
+    # sonra uygulanir, boylece onbellek ve canli veri ayni seriyi uretir.
+    frame = _to_valuation_dates(frame, code)
 
     series = pd.Series(
         frame["price"].astype(float).to_numpy(),

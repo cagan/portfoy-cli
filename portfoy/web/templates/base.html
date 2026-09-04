@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block baslik %}Portföy{% endblock %} · Portföy</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="ust">
+  <a class="marka" href="/">Portföy</a>
+  <nav>
+    <a href="/" class="{{ 'etkin' if aktif == 'durum' }}">Durum</a>
+    <a href="/islemler" class="{{ 'etkin' if aktif == 'islemler' }}">İşlemler</a>
+    <a href="/raporlar" class="{{ 'etkin' if aktif == 'raporlar' }}">Raporlar</a>
+    <a href="/eposta" class="{{ 'etkin' if aktif == 'eposta' }}">E-posta</a>
+  </nav>
+  <form method="post" action="/yenile" class="sag">
+    <button type="submit" class="ikincil" title="TEFAS'tan fiyatları yeniden çek">Yenile</button>
+  </form>
+</header>
+
+<main>
+  {% for tur, mesaj in bildirimler %}
+    <div class="bildirim {{ tur }}">{{ mesaj }}</div>
+  {% endfor %}
+
+  {% if veri_hatasi %}
+    <div class="bildirim hata">{{ veri_hatasi }}</div>
+  {% endif %}
+
+  {% block icerik %}{% endblock %}
+</main>
+
+<footer>
+  <span>portfoy v{{ surum }}</span>
+  <span>Yalnızca bu bilgisayardan erişilebilir ·
+    <a href="/api/docs" title="Swagger arayüzünü CDN'den yükler; çevrimdışı boş görünür">API</a>
+    (<a href="/openapi.json">şema</a>)</span>
+</footer>
+</body>
+</html>

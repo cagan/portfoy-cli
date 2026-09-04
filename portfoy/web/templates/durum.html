@@ -1,0 +1,213 @@
+{% extends "base.html" %}
+{% set aktif = 'durum' %}
+{% block baslik %}Durum{% endblock %}
+
+{% block icerik %}
+{% if bekleyenler %}
+  <div class="bildirim bilgi">
+    <strong>{{ bekleyenler | length }} bekleyen emir</strong> — adetler
+    gerçekleşmeye kadar aşağıdaki tabloda görünmeye devam eder, çünkü fiyat
+    riskini o güne kadar siz taşıyorsunuz.
+    <ul class="kucuk-liste">
+    {% for emir in bekleyenler %}
+      <li>{{ emir.kod }} · {{ 'satış' if emir.satis_mi else 'alış' }}
+          {{ fmt_units(emir.adet if emir.adet > 0 else -emir.adet) }} adet ·
+          gerçekleşme <strong>{{ emir.gerceklesme.strftime('%d.%m.%Y') }}</strong></li>
+    {% endfor %}
+    </ul>
+    <a href="/islemler" class="kucuk">İşlemler sayfasında yönet</a>
+  </div>
+{% endif %}
+{% if sonuc is none and veri_hatasi %}
+  {# Fiyat cekilemedigi icin analiz yok - portfoyun bos oldugu ANLAMINA GELMEZ.
+     Ikisini ayni ekranda gostermek, parasi duran kullaniciya "acik pozisyon
+     yok" demek olurdu. #}
+  <section class="kart bos">
+    <h2>Fiyat verisi alınamadı</h2>
+    <p>Portföy kaydınız duruyor; gösterilemeyen şey yalnızca güncel fiyatlar.</p>
+    {% if acik_kodlar %}
+      <p>Kayıtlı açık pozisyonlar: <strong>{{ acik_kodlar | join(', ') }}</strong></p>
+    {% endif %}
+    <form method="post" action="/yenile"><button type="submit">Yeniden dene</button></form>
+  </section>
+{% elif sonuc is none %}
+  <section class="kart bos">
+    <h2>Açık pozisyon yok</h2>
+    {% if kapanmis_kodlar %}
+      <p>Kapanmış pozisyon: <strong>{{ kapanmis_kodlar | join(', ') }}</strong> —
+         işlem geçmişi <a href="/islemler">İşlemler</a> sayfasında duruyor.</p>
+    {% else %}
+      <p>Henüz fon kaydı yok. <a href="/islemler">İşlemler</a> sayfasından ilk alışınızı girin.</p>
+    {% endif %}
+  </section>
+{% else %}
+  {% set a = sonuc.analysis %}
+
+  <section class="ozet">
+    <div class="kutu">
+      <span class="etiket">Toplam Değer</span>
+      <span class="rakam">{{ fmt_money(a.total_value) }}</span>
+      <span class="alt">{{ a.as_of.strftime('%d.%m.%Y') }} fiyatlarıyla</span>
+    </div>
+    {% for periyot in ['gunluk', 'haftalik', 'aylik'] %}
+      {% set getiri = a.weighted_returns.get(periyot) %}
+      <div class="kutu">
+        <span class="etiket">{{ PERIOD_LABELS[periyot] }}</span>
+        <span class="rakam {{ 'artı' if getiri and getiri > 0 else ('eksi' if getiri and getiri < 0 else '') }}">
+          {{ fmt_pct(getiri) }}
+        </span>
+        <span class="alt">{{ fmt_money_change(a.value_change(periyot)) }}</span>
+        <span class="alt kucuk">{{ a.window_label(periyot) }}</span>
+        {# Akis notu getiriden AYRI satirda: portfoyden cikan para kayip degil,
+           nakde donen paradir. Ayni satira koymak ikisini tek bir buyukluk
+           gibi okuturdu. #}
+        {% set akis = a.flow_note(periyot) %}
+        {% if akis %}<span class="alt kucuk akis">↳ {{ akis }}</span>{% endif %}
+      </div>
+    {% endfor %}
+  </section>
+
+  {# Kapanan fon fon tablosunda YOK (elde adet kalmadi) ama getiriye dahil.
+     Alttaki "Kapanmış pozisyon" bagi islem gecmisine goturur; bu not ise
+     rakamin kapsamini anlatir, o yuzden ozetin hemen altinda duruyor. #}
+  {% if a.closed_note %}
+    <p class="aciklama kucuk kapanis-notu">{{ a.closed_note }}</p>
+  {% endif %}
+
+  <section class="kart">
+    <div class="kart-ust">
+      <h2>Hedefe göre durum</h2>
+      <span class="rozet {{ 'iyi' if a.target_met else 'kotu' }}">
+        {{ 'HEDEF TUTTU' if a.target_met else 'HEDEFİN ALTINDA' }}
+      </span>
+    </div>
+    <p class="aciklama">
+      Aylık hedef <strong>%{{ fmt_number(a.target_monthly_return) }}</strong> ·
+      gerçekleşen
+      {% if a.monthly_return is none %}—{% else %}<strong>%{{ fmt_number(a.monthly_return) }}</strong>{% endif %}
+      {% if a.target_gap is not none %}
+        ({{ '+' if a.target_gap >= 0 else '−' }}{{ fmt_number(a.target_gap|abs) }} yüzde puan)
+      {% endif %}
+      <br><span class="kucuk">Ölçüm: {{ a.window_label('aylik') }} — ay başından değil.</span>
+    </p>
+  </section>
+
+  <section class="kart">
+    <h2>Fonlar</h2>
+    <div class="tablo-kaydir">
+    <table>
+      <thead>
+        <tr>
+          <th>Fon</th><th class="sag">Adet</th><th class="sag">Fiyat</th>
+          <th class="sag">Değer</th><th class="sag">Ağırlık</th>
+          <th class="sag">Günlük</th><th class="sag">Haftalık</th><th class="sag">Aylık</th>
+          <th class="sag">Kâr/Zarar</th>
+        </tr>
+      </thead>
+      {# Yalnizca ACIK pozisyonlar. Sinif, "kapanmis fon holding olarak
+         listelenmez" kuralini test edilebilir kiliyor: govde adres alinabilir
+         olmadan test butun tabloya bakmak zorunda kaliyordu. #}
+      <tbody class="holdingler">
+      {% for row in a.rows %}
+        <tr>
+          <td><strong>{{ row.code }}</strong><br><span class="kucuk">{{ row.title }}</span></td>
+          <td class="sag">{{ fmt_units(row.units) }}</td>
+          <td class="sag">{{ fmt_price(row.price) }}</td>
+          <td class="sag">{{ fmt_money(row.value) }}</td>
+          <td class="sag">%{{ fmt_number(row.weight_pct, 1) }}</td>
+          {% for periyot in ['gunluk', 'haftalik', 'aylik'] %}
+            {% set g = row.returns.get(periyot) %}
+            {% set tl = row.value_change(periyot) %}
+            <td class="sag {{ 'artı' if g and g > 0 else ('eksi' if g and g < 0 else '') }}">
+              {{ fmt_pct(g) }}
+              {%- if row.is_partial(periyot) %}<span class="yildiz" title="{{ row.partial_note }}">*</span>{% endif %}
+              {#- Yuzde ile TL'nin ayrisabilecegi hucre: donem icinde islem var. #}
+              {%- if row.has_flow(periyot) %}<span class="akis-isareti" title="{{ FLOW_MARK_NOTE }}">{{ FLOW_MARK }}</span>{% endif %}
+              {# TL karsiligi: yuzde tek basina "ne kadar para" sorusunu
+                 cevaplamiyor - %1'lik hareket 1,9 milyonluk TLY'de 19 bin TL,
+                 350 binlik DFI'de 3,5 bin TL demek. #}
+              <br><span class="kucuk">{{ fmt_money_change(tl) }}</span>
+            </td>
+          {% endfor %}
+          <td class="sag {{ 'artı' if row.profit and row.profit > 0 else ('eksi' if row.profit and row.profit < 0 else '') }}">
+            {% if row.profit is none %}
+              <span class="kucuk" title="Alış fiyatı kayıtlı değil">—</span>
+            {% else %}
+              {{ '+' if row.profit >= 0 else '−' }}{{ fmt_money(row.profit if row.profit >= 0 else -row.profit) }}
+              <br><span class="kucuk">%{{ fmt_number(row.profit_pct, 1) }}</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+      <tfoot>
+        {# Kapanan pozisyonlar: holding DEGIL, o yuzden govdenin disinda ve
+           adet/fiyat/deger/agirlik hucreleri bos. Ama periyot kolonlarindaki
+           TL'ler burada; boylece kolonu toplayan kullanici Toplam satirindaki
+           rakama variyor. Alttaki "Kapanmis pozisyon" bagi islem gecmisine
+           goturur - o kalir, bu satir isin SAYISAL tarafini verir. #}
+        {% if a.closed_label %}
+        <tr class="kapanan-satir">
+          <td><span class="etiket-kapanan">Kapanan</span><br>
+              <span class="kucuk">{{ a.closed_label }}</span></td>
+          <td class="sag"></td><td class="sag"></td>
+          <td class="sag"></td><td class="sag"></td>
+          {% for periyot in ['gunluk', 'haftalik', 'aylik'] %}
+            {% set tl = a.closed_value_change(periyot) %}
+            <td class="sag {{ 'artı' if tl and tl > 0 else ('eksi' if tl and tl < 0 else '') }}">
+              {{ fmt_money_change(tl) }}
+            </td>
+          {% endfor %}
+          <td class="sag"></td>
+        </tr>
+        {% endif %}
+        <tr>
+          <th>Toplam</th><th></th><th></th>
+          <th class="sag">{{ fmt_money(a.total_value) }}</th>
+          <th class="sag">%100</th>
+          {% for periyot in ['gunluk', 'haftalik', 'aylik'] %}
+            {% set g = a.weighted_returns.get(periyot) %}
+            <th class="sag {{ 'artı' if g and g > 0 else ('eksi' if g and g < 0 else '') }}">
+              {{ fmt_pct(g) }}
+              <br><span class="kucuk">{{ fmt_money_change(a.value_change(periyot)) }}</span>
+            </th>
+          {% endfor %}
+          <th class="sag">
+            {% if a.total_profit is not none %}
+              {{ '+' if a.total_profit >= 0 else '−' }}{{ fmt_money(a.total_profit if a.total_profit >= 0 else -a.total_profit) }}
+            {% else %}—{% endif %}
+          </th>
+        </tr>
+      </tfoot>
+    </table>
+    </div>
+    {# Kolonlarin NEYI olctugu: aciklama olmadan ayrisma "tutarsizlik" gibi
+       okunuyor. Metin config'te; konsol, Excel ve e-posta ayni cumleyi yazar. #}
+    <p class="kolon-notu kucuk">{{ COLUMN_BASIS_NOTE }}</p>
+    {% if a.all_rows | selectattr('flow_periods') | first is defined %}
+      <p class="kolon-notu kucuk">{{ FLOW_MARK_NOTE }}</p>
+    {% endif %}
+    <p class="kolon-notu kucuk">{{ TOTAL_BASIS_NOTE }}</p>
+
+    {% set kismi = a.partial_rows() %}
+    {% if kismi %}
+      <ul class="notlar">
+        {% for row in kismi %}<li><strong>{{ row.code }}</strong> — {{ row.partial_note }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    {% if sonuc.uyarilar %}
+      <ul class="notlar uyari-liste">
+        {% for uyari in sonuc.uyarilar %}<li>{{ uyari }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+  </section>
+
+  {% if kapanmis_kodlar %}
+    <p class="kucuk dipnot">
+      Kapanmış pozisyon: {{ kapanmis_kodlar | join(', ') }} —
+      <a href="/islemler">işlem geçmişi ve gerçekleşen kâr/zarar</a>.
+    </p>
+  {% endif %}
+{% endif %}
+{% endblock %}

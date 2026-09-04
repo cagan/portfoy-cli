@@ -1,0 +1,216 @@
+/* Tek dosya, derleme adimi yok. Renkler config.PALETTES ile ayni aileden;
+   grafiklerle yan yana durdugunda arayuz onlardan kopuk gorunmesin. */
+
+:root {
+  color-scheme: light dark;
+  --yuzey: #fcfcfb;
+  --sayfa: #f9f9f7;
+  --metin: #0b0b0b;
+  --metin-ikincil: #52514e;
+  --soluk: #898781;
+  --izgara: #e1e0d9;
+  --eksen: #c3c2b7;
+  --artı: #006300;
+  --eksi: #d03b3b;
+  --vurgu: #2a78d6;
+  --uyari-zemin: #fdf4e3;
+  --hata-zemin: #fdeaea;
+  --basari-zemin: #eaf5ea;
+  --bilgi-zemin: #eaf1fb;
+  --yuvarlak: 8px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --yuzey: #1a1a19;
+    --sayfa: #0d0d0d;
+    --metin: #ffffff;
+    --metin-ikincil: #c3c2b7;
+    --soluk: #898781;
+    --izgara: #2c2c2a;
+    --eksen: #383835;
+    --artı: #0ca30c;
+    --eksi: #d03b3b;
+    --vurgu: #3987e5;
+    --uyari-zemin: #2e2717;
+    --hata-zemin: #2e1a1a;
+    --basari-zemin: #14240f;
+    --bilgi-zemin: #14202e;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--sayfa);
+  color: var(--metin);
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+}
+
+/* --- Ust cubuk --- */
+.ust {
+  display: flex; align-items: center; gap: 20px;
+  padding: 12px 24px;
+  background: var(--yuzey);
+  border-bottom: 1px solid var(--izgara);
+  position: sticky; top: 0; z-index: 10;
+  flex-wrap: wrap;
+}
+.marka { font-weight: 700; font-size: 17px; color: var(--metin); text-decoration: none; }
+.ust nav { display: flex; gap: 4px; }
+.ust nav a {
+  padding: 6px 12px; border-radius: var(--yuvarlak);
+  color: var(--metin-ikincil); text-decoration: none;
+}
+.ust nav a:hover { background: var(--sayfa); color: var(--metin); }
+.ust nav a.etkin { background: var(--vurgu); color: #fff; }
+.ust .sag { margin-left: auto; }
+
+main { max-width: 1080px; margin: 0 auto; padding: 24px; }
+
+footer {
+  max-width: 1080px; margin: 0 auto; padding: 16px 24px 40px;
+  display: flex; justify-content: space-between; gap: 16px;
+  color: var(--soluk); font-size: 12px; flex-wrap: wrap;
+}
+footer a { color: var(--soluk); }
+
+/* --- Bildirimler --- */
+.bildirim {
+  padding: 12px 16px; border-radius: var(--yuvarlak); margin-bottom: 16px;
+  border: 1px solid var(--izgara); line-height: 1.5;
+}
+.bildirim.basari { background: var(--basari-zemin); border-color: var(--artı); }
+.bildirim.hata   { background: var(--hata-zemin);   border-color: var(--eksi); }
+.bildirim.uyari  { background: var(--uyari-zemin);  border-color: #eda100; }
+.bildirim.bilgi  { background: var(--bilgi-zemin);  border-color: var(--vurgu); }
+
+/* --- Kartlar --- */
+.kart {
+  background: var(--yuzey); border: 1px solid var(--izgara);
+  border-radius: var(--yuvarlak); padding: 20px; margin-bottom: 20px;
+}
+.kart > h2, .kart summary h2 { margin: 0 0 12px; font-size: 16px; }
+.kart h3 { font-size: 14px; margin: 20px 0 8px; }
+.kart-ust { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.kart-ust h2 { margin: 0 0 12px; }
+.kart.bos { text-align: center; padding: 40px 20px; }
+.aciklama { color: var(--metin-ikincil); margin: 0 0 16px; }
+.kucuk { font-size: 12px; color: var(--soluk); }
+.dipnot { margin-top: -8px; }
+
+/* --- Ozet kutulari --- */
+.ozet { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.kutu {
+  background: var(--yuzey); border: 1px solid var(--izgara);
+  border-radius: var(--yuvarlak); padding: 16px; display: flex; flex-direction: column; gap: 4px;
+}
+.kutu .etiket { font-size: 12px; color: var(--soluk); text-transform: uppercase; letter-spacing: .04em; }
+.kutu .rakam { font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.kutu .alt { font-size: 12px; color: var(--metin-ikincil); font-variant-numeric: tabular-nums; }
+/* Akis notu: getiri rakamlarindan gorsel olarak AYRISMALI - portfoye giren/
+   cikan para bir kazanc/kayip degil. Bu yuzden soluk renk ve tabular-nums yok;
+   kutudaki diger rakamlarla ayni aileden gorunmesin. */
+.kutu .alt.akis { color: var(--soluk); font-variant-numeric: normal; line-height: 1.35; }
+.kapanis-notu { color: var(--soluk); margin: -8px 0 16px; }
+/* Kapanan pozisyon satiri: tablo GOVDESINDEN gorsel olarak ayrilmali - holding
+   degil, "bu pencerede sunu da yasadiniz" satiri. Ustteki cizgi ayrimi yapar,
+   soluk zemin ve italik etiket de holding satirlariyla karistirilmasini onler. */
+tfoot tr.kapanan-satir td { border-top: 2px solid var(--izgara); background: var(--sayfa); color: var(--metin-ikincil); }
+.etiket-kapanan { font-style: italic; color: var(--soluk); }
+/* Akis isareti: yildizdan (kismi periyot) AYRI bir sey soyluyor, o yuzden ayri
+   renk. Ikisi ayni hucrede yan yana gorunebilir. */
+.akis-isareti { color: var(--soluk); cursor: help; font-weight: 600; }
+.kolon-notu { color: var(--soluk); margin: 8px 0 0; }
+
+/* --- Tablolar --- */
+.tablo-kaydir { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { padding: 9px 10px; text-align: left; border-bottom: 1px solid var(--izgara); vertical-align: top; }
+thead th { font-size: 12px; color: var(--soluk); text-transform: uppercase; letter-spacing: .04em; font-weight: 600; }
+tfoot th { border-top: 2px solid var(--eksen); border-bottom: none; font-size: 14px; }
+/* Sayisal hucreler sarilmasin: '1.935.083,15 ₺' satir ortasindan bolununce
+   binlik ayraci ondalik gibi okunuyor - para rakaminda bu kabul edilemez. */
+td.sag, th.sag { text-align: right; white-space: nowrap; }
+td.sag .kucuk { white-space: normal; }
+tr.kapanmis td { opacity: .62; }
+tr.acik-ay td { color: var(--metin-ikincil); font-style: italic; }
+.ic-tablo { margin-top: 6px; font-size: 12px; }
+.ic-tablo td { padding: 3px 8px; border: none; white-space: nowrap; }
+
+.artı { color: var(--artı); }
+.eksi { color: var(--eksi); }
+.yildiz { color: var(--soluk); cursor: help; }
+
+.notlar { margin: 12px 0 0; padding-left: 18px; font-size: 13px; color: var(--metin-ikincil); }
+.notlar.uyari-liste { color: var(--eksi); }
+
+/* --- Rozetler --- */
+.rozet {
+  display: inline-block; padding: 3px 9px; border-radius: 99px;
+  font-size: 11px; font-weight: 650; letter-spacing: .03em; white-space: nowrap;
+}
+.rozet.iyi  { background: var(--basari-zemin); color: var(--artı); }
+.rozet.kotu { background: var(--hata-zemin);   color: var(--eksi); }
+.rozet.notr { background: var(--sayfa); color: var(--metin-ikincil); border: 1px solid var(--izgara); }
+.kucuk-rozet { background: var(--sayfa); color: var(--soluk); border: 1px solid var(--izgara); font-weight: 500; }
+
+/* --- Formlar --- */
+.izgara { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; align-items: start; }
+.satir { display: flex; gap: 14px; align-items: flex-end; flex-wrap: wrap; }
+.izgara .tam { grid-column: 1 / -1; }
+
+label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; font-weight: 550; }
+label.onay { flex-direction: row; align-items: center; gap: 8px; font-weight: 400; font-size: 13px; }
+.ipucu { font-size: 11px; color: var(--soluk); font-weight: 400; }
+
+input, select {
+  padding: 8px 10px; border: 1px solid var(--eksen); border-radius: 6px;
+  background: var(--sayfa); color: var(--metin); font: inherit; font-size: 14px;
+}
+input[type="checkbox"] { width: auto; padding: 0; accent-color: var(--vurgu); }
+input:focus, select:focus { outline: 2px solid var(--vurgu); outline-offset: 1px; border-color: var(--vurgu); }
+
+fieldset { border: 1px solid var(--izgara); border-radius: var(--yuvarlak); padding: 12px; display: flex; gap: 18px; flex-wrap: wrap; }
+legend { font-size: 12px; color: var(--soluk); padding: 0 6px; }
+
+button {
+  padding: 9px 18px; border: none; border-radius: 6px;
+  background: var(--vurgu); color: #fff; font: inherit; font-weight: 600; cursor: pointer;
+}
+button:hover { filter: brightness(1.08); }
+button:disabled { opacity: .45; cursor: not-allowed; filter: none; }
+button.ikincil { background: transparent; color: var(--metin-ikincil); border: 1px solid var(--eksen); font-weight: 500; }
+button.uyari-buton { background: #b8860b; }
+button.tehlike-buton { background: var(--eksi); }
+
+/* --- Yikici islemler --- */
+details.tehlikeli { border-color: var(--eksen); }
+details.tehlikeli summary { cursor: pointer; list-style: revert; }
+details.tehlikeli summary h2 { display: inline; }
+details summary { cursor: pointer; }
+
+/* --- Dosyalar ve galeri --- */
+.dosyalar { list-style: none; padding: 0; margin: 0 0 20px; }
+.dosyalar li { display: flex; gap: 10px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--izgara); }
+.dosyalar a { color: var(--vurgu); }
+
+.galeri { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.galeri figure { margin: 0; }
+.galeri img { width: 100%; height: auto; border: 1px solid var(--izgara); border-radius: var(--yuvarlak); display: block; }
+.galeri figcaption { font-size: 12px; color: var(--soluk); margin-top: 6px; text-align: center; }
+
+@media (max-width: 600px) {
+  main { padding: 16px; }
+  .ust { padding: 10px 16px; gap: 12px; }
+  .ust .sag { margin-left: 0; }
+}
+
+/* --- Bekleyen emirler --- */
+.bekleyen-kart { border-left: 3px solid var(--vurgu); }
+.kucuk-liste { margin: 8px 0 6px; padding-left: 18px; font-size: 13px; }
+.kucuk-liste li { margin: 2px 0; }
+.satir-ic { display: inline; }
+.kucuk-buton { padding: 4px 10px; font-size: 12px; }
+details summary.kucuk { margin-top: 12px; }

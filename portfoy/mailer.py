@@ -212,12 +212,19 @@ def build_subject(analysis: PortfolioAnalysis) -> str:
 
 
 def _marked(row, period: str) -> str:
-    """Getiri metni; fon periyodun tamaminda elde degilse yildizli."""
+    """Getiri metni, isaretleriyle.
+
+    `*` fon periyodun tamaminda elde degildi.
+    `†` periyot icinde alim/satim var; yuzde ile TL ayni tabandan cikmaz
+        (bkz. config.COLUMN_BASIS_NOTE).
+    """
     text = fmt_pct(row.returns.get(period))
-    return f"{text}*" if row.is_partial(period) else text
+    if row.is_partial(period):
+        text += "*"
+    return text + row.flow_mark(period)
 
 
-def build_text_body(analysis: PortfolioAnalysis) -> str:
+def build_text_body(analysis: PortfolioAnalysis, track_record: list | None = None) -> str:
     lines = [
         f"TEFAS Portföy Raporu — {analysis.as_of:%d.%m.%Y}",
         "",
@@ -227,8 +234,31 @@ def build_text_body(analysis: PortfolioAnalysis) -> str:
     for period, label in config.PERIOD_LABELS.items():
         lines.append(
             f"Ağırlıklı Ortalama {label} Getiri: "
-            f"{fmt_pct(analysis.weighted_returns.get(period))}"
+            f"{fmt_pct(analysis.weighted_returns.get(period))} "
+            f"({fmt_money_change(analysis.value_change(period))})"
         )
+        # Akis AYRI satirda: portfoyden cikan para kar/zarar degil, ama toplam
+        # degerin neden degistigini aciklayan tek sey o.
+        flow = analysis.flow_note(period)
+        if flow:
+            lines.append(f"  Dış para akışı: {flow}")
+
+    closed_note = analysis.closed_note
+    if closed_note:
+        lines.append(f"Kapanan pozisyon: {closed_note}")
+
+    bounds = analysis.window("aylik")
+    if bounds:
+        lines.append(
+            f"Ölçüm penceresi: {analysis.window_label('aylik')} (ay başından değil)"
+        )
+
+    closed = [item for item in (track_record or []) if item.closed]
+    if closed:
+        lines += ["", "Takvim ayı karnesi:"]
+        for item in closed:
+            mark = "" if item.is_actual else "  (temsili)"
+            lines.append(f"  {item.label}: {fmt_pct(item.ret)}{mark}")
 
     lines += ["", f"Hedef Aylık Getiri: %{fmt_number(analysis.target_monthly_return)}"]
     gap = analysis.target_gap
@@ -245,8 +275,11 @@ def build_text_body(analysis: PortfolioAnalysis) -> str:
             f"({fmt_pct(analysis.total_profit_pct)})"
         )
 
+    # `all_rows`: kapanmis fon da listelenir (adet 0), yoksa gunluk TL kolonunu
+    # toplayan kullanici ozetteki rakami tutturamaz.
     lines += ["", "Fon detayı:"]
-    for row in analysis.rows:
+    for row in analysis.all_rows:
+        kapanis = f"  [KAPANDI {row.closed_on:%d.%m}]" if row.closed_on else ""
         lines.append(
             f"  {row.code:<5} {fmt_units(row.units):>12} adet  "
             f"{fmt_price(row.price):>12} ₺  "
@@ -254,13 +287,20 @@ def build_text_body(analysis: PortfolioAnalysis) -> str:
             f"günlük {_marked(row, 'gunluk')} "
             f"({fmt_money_change(row.value_change('gunluk'))})  "
             f"haftalık {_marked(row, 'haftalik')}  "
-            f"aylık {_marked(row, 'aylik')}"
+            f"aylık {_marked(row, 'aylik')}{kapanis}"
         )
 
     partial = analysis.partial_rows()
     if partial:
         lines += ["", "* Periyodun tamamında portföyde değildi:"]
         lines += [f"  - {row.code}: {row.partial_note}" for row in partial]
+
+    # Kolonlarin NEYI olctugu: aciklama olmadan "%" ile "₺"nin ayrismasi
+    # tutarsizlik gibi okunuyor.
+    lines += ["", config.COLUMN_BASIS_NOTE]
+    if any(row.flow_periods for row in analysis.all_rows):
+        lines.append(config.FLOW_MARK_NOTE)
+    lines.append(config.TOTAL_BASIS_NOTE)
 
     if analysis.failures:
         lines += ["", "Verisi alınamayan fonlar:"]
@@ -281,7 +321,74 @@ def _cell(content: str, palette: dict, align: str = "right", bold: bool = False,
     )
 
 
-def build_html_body(analysis: PortfolioAnalysis, inline_images: dict[str, str]) -> str:
+def _track_record_html(track_record: list, analysis, palette: dict) -> str:
+    """Takvim ayi karnesi: 4 sutunlu kompakt izgara.
+
+    Gorseller e-posta istemcisinde engellenebiliyor; karne yalnizca grafikte
+    kalirsa okunamaz olur. Bu yuzden ayni bilgi metin olarak da veriliyor.
+    Izgara ic ice <table> ile kuruldu: `inline-block` Outlook'un Word motorunda
+    calismiyor, tablo hucresi her istemcide calisiyor.
+    """
+    closed = [item for item in track_record if item.closed]
+    if not closed:
+        return ""
+
+    target = analysis.target_monthly_return
+    hit = sum(1 for item in closed if item.ret >= target)
+    product = 1.0
+    for item in closed:
+        product *= 1.0 + item.ret / 100.0
+    geometric = (product ** (1.0 / len(closed)) - 1.0) * 100.0
+
+    columns = 4
+    cells = []
+    for item in closed:
+        color = palette["positive"] if item.ret >= target else palette["negative"]
+        mark = "" if item.is_actual else "†"
+        cells.append(
+            f'<td style="padding:6px 10px;width:25%">'
+            f'<div style="color:{palette["text_secondary"]};font-size:11px">'
+            f"{item.short_label}{mark}</div>"
+            f'<div style="color:{color};font-size:14px;font-weight:600">'
+            f"{fmt_pct(item.ret)}</div></td>"
+        )
+    rows = "".join(
+        f"<tr>{''.join(cells[index:index + columns])}</tr>"
+        for index in range(0, len(cells), columns)
+    )
+
+    hypothetical = all(not item.is_actual for item in closed)
+    note = (
+        f'<div style="margin-top:8px;color:{palette["muted"]};font-size:11px">'
+        "† <strong>Temsili</strong> — o ay için portföy kaydı yoktu; fonların "
+        "gerçek ay getirileri bugünkü ağırlıklarla canlandırıldı. "
+        "Gerçekleşmiş performans değildir. Portföy kaydı biriktikçe bu aylar "
+        "gerçekleşen getiriyle değişecek.</div>"
+        if any(not item.is_actual for item in closed)
+        else ""
+    )
+    heading = "Takvim Ayı Karnesi" + (" (temsili)" if hypothetical else "")
+
+    return (
+        f'<div style="margin-top:24px;padding:14px 16px;border-radius:6px;'
+        f'background:{palette["page"]}">'
+        f'<div style="font-weight:600;font-size:13px;'
+        f'color:{palette["text_primary"]}">{heading}</div>'
+        f'<div style="margin:2px 0 8px;color:{palette["text_secondary"]};font-size:12px">'
+        f"{len(closed)} kapanmış ayda {hit} kez hedef tuttu · "
+        f"aylık ortalama (bileşik) {fmt_pct(geometric)} · "
+        f"hedef %{fmt_number(target)}</div>"
+        f'<table style="width:100%;border-collapse:collapse" '
+        f'cellspacing="0" cellpadding="0">{rows}</table>'
+        f"{note}</div>"
+    )
+
+
+def build_html_body(
+    analysis: PortfolioAnalysis,
+    inline_images: dict[str, str],
+    track_record: list | None = None,
+) -> str:
     """E-posta gövdesi. Stiller satır içi — posta istemcileri <style> bloklarını atar."""
     palette = config.PALETTES["light"]
     positive, negative = palette["positive"], palette["negative"]
@@ -303,10 +410,13 @@ def build_html_body(analysis: PortfolioAnalysis, inline_images: dict[str, str]) 
     )
 
     body_rows = []
-    for row in analysis.rows:
+    # `all_rows`: kapanmis satir da tabloda. Adet/deger 0 oldugu icin toplamlari
+    # bozmaz ama "Günlük ₺" kolonunun toplami artik ozetteki rakami tutar.
+    for row in analysis.all_rows:
         contribution = row.contributions.get("aylik")
+        etiket = f"{row.code} · KAPANDI {row.closed_on:%d.%m}" if row.closed_on else row.code
         cells = [
-            _cell(row.code, palette, "left", bold=True),
+            _cell(etiket, palette, "left", bold=True),
             _cell(fmt_units(row.units), palette),
             _cell(fmt_price(row.price), palette),
             _cell(fmt_number(row.value, 0), palette),
@@ -339,9 +449,36 @@ def build_html_body(analysis: PortfolioAnalysis, inline_images: dict[str, str]) 
     for period, label in config.PERIOD_LABELS.items():
         value = analysis.weighted_returns.get(period)
         suffix = "*" if analysis.partial_rows(period) else ""
-        summary_rows.append(
-            (f"Ağırlıklı Ortalama {label}", fmt_pct(value) + suffix, tone(value))
+        # Etiketin yanina olculen pencere: "Aylık" tek basina ay basindan bu
+        # yana diye okunabiliyordu.
+        bounds = analysis.window(period)
+        window_html = (
+            f' <span style="color:{palette["muted"]};font-size:11px">'
+            f"{bounds[0]:%d.%m} → {bounds[1]:%d.%m}</span>"
+            if bounds
+            else ""
         )
+        summary_rows.append(
+            (
+                f"Ağırlıklı Ortalama {label}{window_html}",
+                fmt_pct(value) + suffix,
+                tone(value),
+            )
+        )
+    # Akis satirlari getirilerin hemen ardinda: rakamin neden oldugu gibi
+    # ciktigini aciklarlar. Renk NOTR - akis bir kazanc/kayip degil.
+    for period, label in config.PERIOD_LABELS.items():
+        flow = analysis.flow_note(period)
+        if flow:
+            summary_rows.append(
+                (f"{label} Dış Para Akışı", flow, palette["text_secondary"])
+            )
+    closed_note = analysis.closed_note
+    if closed_note:
+        summary_rows.append(
+            ("Kapanan Pozisyon", closed_note, palette["text_secondary"])
+        )
+
     total_profit = analysis.total_profit
     if total_profit is not None:
         summary_rows.append(
@@ -380,6 +517,8 @@ def build_html_body(analysis: PortfolioAnalysis, inline_images: dict[str, str]) 
         for cid, alt in inline_images.items()
     )
 
+    track_html = _track_record_html(track_record or [], analysis, palette)
+
     partial_html = ""
     partial = analysis.partial_rows()
     if partial:
@@ -395,6 +534,21 @@ def build_html_body(analysis: PortfolioAnalysis, inline_images: dict[str, str]) 
             f"getirisi alış tarihinden itibaren hesaplandı, TEFAS'ın tam periyot "
             f"rakamıyla aynı değildir.<ul>{items}</ul></div>"
         )
+
+    # Kolon tabani kutusu: yildiz notuyla ayni uslupta, her zaman basilir.
+    # Yildiz "fon ne kadar suredir elde" sorusunu, bu ise "kolon neyi olcuyor"
+    # sorusunu cevapliyor - ikisi ayri kutularda kalsin.
+    basis_items = [config.COLUMN_BASIS_NOTE]
+    if any(row.flow_periods for row in analysis.all_rows):
+        basis_items.append(config.FLOW_MARK_NOTE)
+    basis_items.append(config.TOTAL_BASIS_NOTE)
+    basis_html = (
+        f'<div style="margin-top:16px;padding:10px 16px;border-radius:6px;'
+        f'background:{palette["page"]};color:{palette["text_secondary"]};'
+        f'font-size:12px">'
+        + "".join(f"<div>{item}</div>" for item in basis_items)
+        + "</div>"
+    )
 
     failures_html = ""
     if analysis.failures:
@@ -432,7 +586,9 @@ def build_html_body(analysis: PortfolioAnalysis, inline_images: dict[str, str]) 
    {summary_html}
   </table>
 
+  {track_html}
   {partial_html}
+  {basis_html}
   {images_html}
   {failures_html}
 
@@ -449,6 +605,7 @@ def build_message(
     analysis: PortfolioAnalysis,
     attachments: list[Path] | None,
     settings: MailConfig,
+    track_record: list | None = None,
 ) -> EmailMessage:
     """Gonderilecek e-postayi kurar (duz metin + HTML + gomulu grafik + ekler)."""
     attachments = [path for path in (attachments or []) if path and path.exists()]
@@ -472,8 +629,10 @@ def build_message(
     message["To"] = ", ".join(settings.recipients)
     message["Date"] = formatdate(localtime=True)
 
-    message.set_content(build_text_body(analysis))
-    message.add_alternative(build_html_body(analysis, inline_map), subtype="html")
+    message.set_content(build_text_body(analysis, track_record))
+    message.add_alternative(
+        build_html_body(analysis, inline_map, track_record), subtype="html"
+    )
 
     # HTML bolumu multipart/related'a cevrilir ki cid: baglantilari calissin.
     html_part = message.get_payload()[-1]
@@ -498,6 +657,7 @@ def send_report(
     analysis: PortfolioAnalysis,
     attachments: list[Path] | None = None,
     mail_config: MailConfig | None = None,
+    track_record: list | None = None,
 ) -> list[str]:
     """Raporu e-posta ile gonderir. Basarisizlikta MailError firlatir.
 
@@ -512,7 +672,7 @@ def send_report(
             "Kurmak için: python main.py mail-ayar --kullanici ADRES"
         )
 
-    _deliver(build_message(analysis, attachments, settings), settings)
+    _deliver(build_message(analysis, attachments, settings, track_record), settings)
     return list(settings.recipients)
 
 

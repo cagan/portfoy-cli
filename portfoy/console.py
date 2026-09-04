@@ -31,20 +31,49 @@ def _tone(value: float | None) -> str:
 
 
 def _return_text(row, period: str) -> str:
-    """Getiri hucresi. Fon periyodun tamaminda elde degilse yildizla isaretlenir."""
+    """Getiri hucresi, isaretleriyle.
+
+    `*` fon periyodun tamaminda elde degildi (getiri alistan itibaren).
+    `†` periyot icinde alim/satim var; yuzde ile TL ayni tabandan cikmaz
+        (bkz. config.COLUMN_BASIS_NOTE). Iki isaret AYRI seyler soyler ve ayni
+        hucrede birlikte gorunebilirler.
+    """
     text = fmt_pct(row.returns.get(period))
-    return f"{text}*" if row.is_partial(period) else text
+    if row.is_partial(period):
+        text += "*"
+    return text + row.flow_mark(period)
 
 
 # --------------------------------------------------------------------------
-def render(analysis: PortfolioAnalysis) -> None:
+def _track_summary(track_record: list, target: float) -> str:
+    """Karneyi tek satirlik ozete indirger: kac ay tuttu, bilesik ortalama.
+
+    Aritmetik degil BILESIK ortalama: aylik hedef ard arda gelen aylarin
+    carpimiyla tutturulur, toplamiyla degil.
+    """
+    closed = [item for item in track_record if item.closed]
+    if not closed:
+        return ""
+    hit = sum(1 for item in closed if item.ret >= target)
+    product = 1.0
+    for item in closed:
+        product *= 1.0 + item.ret / 100.0
+    geometric = (product ** (1.0 / len(closed)) - 1.0) * 100.0
+    note = " (temsili)" if all(not item.is_actual for item in closed) else ""
+    return (
+        f"{len(closed)} ayda {hit} kez tuttu · "
+        f"bileşik ort. {fmt_pct(geometric)}{note}"
+    )
+
+
+def render(analysis: PortfolioAnalysis, track_record: list | None = None) -> None:
     if _RICH:
-        _render_rich(analysis)
+        _render_rich(analysis, track_record or [])
     else:
-        _render_plain(analysis)
+        _render_plain(analysis, track_record or [])
 
 
-def _render_rich(analysis: PortfolioAnalysis) -> None:
+def _render_rich(analysis: PortfolioAnalysis, track_record: list) -> None:
     console = Console()
 
     # SIMPLE_HEAD: dikey cizgiler yok -> dar terminallerde de sigar.
@@ -71,7 +100,9 @@ def _render_rich(analysis: PortfolioAnalysis) -> None:
     if show_contribution:
         table.add_column("Katkı", justify="right", no_wrap=True)
 
-    for row in analysis.rows:
+    closed_label = analysis.closed_label
+    son_holding = len(analysis.rows) - 1
+    for index, row in enumerate(analysis.rows):
         monthly_contribution = row.contributions.get("aylik")
         cells = [
             row.code,
@@ -87,7 +118,36 @@ def _render_rich(analysis: PortfolioAnalysis) -> None:
             cells.append(
                 Text(fmt_points(monthly_contribution), style=_tone(monthly_contribution))
             )
-        table.add_row(*cells)
+        # Kapanan satir govdeden AYRI dursun: son holding satirindan sonra
+        # ayirici cizgi. Tablo "elimde ne var"i anlatmaya devam etsin.
+        table.add_row(*cells, end_section=bool(closed_label) and index == son_holding)
+
+    # Kapanan pozisyonlar: holding DEGIL, o yuzden adet/fiyat/deger/agirlik
+    # kolonlari bos. Ama periyot kolonlarinda TL degisimi var; boylece kolonu
+    # toplayan kullanici ozetteki rakama variyor.
+    #
+    # TL, "Katkı" kolonuna DEGIL periyot kolonlarina yaziliyor: katki sutunu dar
+    # terminalde gizleniyor ve kapanan pozisyonun rakami tam da gizlenmemesi
+    # gereken sey - PHE'nin 28 bin TL'lik kaybinin gorunurlugu bu isin butun
+    # meselesi.
+    if closed_label:
+        change_cells = [
+            Text(
+                fmt_money_change(analysis.closed_value_change(period)),
+                style=_tone(analysis.closed_value_change(period)),
+            )
+            for period in ("gunluk", "haftalik", "aylik")
+        ]
+        closed_cells = [
+            Text("Kapanan", style="dim bold"),
+            Text(closed_label, style="dim"),
+            "", "", "",
+            *change_cells,
+        ]
+        if show_contribution:
+            katki = analysis.closed_contribution("aylik")
+            closed_cells.append(Text(fmt_points(katki), style=_tone(katki)))
+        table.add_row(*closed_cells)
 
     console.print()
     console.print(table)
@@ -109,6 +169,15 @@ def _render_rich(analysis: PortfolioAnalysis) -> None:
             note.append(f"{row.partial_note}\n", style="dim")
         console.print(note, end="")
 
+    # Kolonlarin NEYI olctugu: "%" birim fiyat getirisi, "₺" portfoye yansiyan
+    # kazanc. Donem icinde islem yapilan fonda ikisi ayrisir ve aciklama
+    # olmadan bu "tutarsizlik" gibi okunuyor.
+    legend = Text()
+    legend.append(f"  {config.COLUMN_BASIS_NOTE}\n", style="dim")
+    if any(row.flow_periods for row in analysis.all_rows):
+        legend.append(f"  {config.FLOW_MARK_NOTE}\n", style="dim")
+    console.print(legend, end="")
+
     # --- Ozet paneli ------------------------------------------------------
     lines = Text()
     lines.append("Toplam Portföy Değeri   ", style="bold")
@@ -124,19 +193,60 @@ def _render_rich(analysis: PortfolioAnalysis) -> None:
             lines.append(f"   ({fmt_money_change(change)})", style="dim")
         covered = analysis.coverage.get(period, 0.0)
         if 0 < covered < 0.999:
-            lines.append(f"   [ağırlığın %{covered * 100:.0f}'i]", style="yellow")
+            # "agirligin" DEGIL: kapsam artik donem basi tabanindan okunuyor
+            # (bkz. PortfolioAnalysis.coverage), getirinin bolundugu buyukluk o.
+            # Eksik fonun ADI da yazilir: "%88" tek basina hangi fonun disarida
+            # kaldigini soylemiyor, kapanmis bir fonun kaybi da boyle yutulur.
+            missing = analysis.uncovered_codes(period)
+            detail = f" — {', '.join(missing)} yok" if missing else ""
+            lines.append(
+                f"   [dönem başı değerin %{covered * 100:.0f}'i{detail}]",
+                style="yellow",
+            )
         clipped = analysis.partial_rows(period)
         if clipped:
             lines.append(
                 f"   [{', '.join(row.code for row in clipped)} kısmi]", style="yellow"
             )
         lines.append("\n")
+        # Akis notu AYRI satirda: 197 bin TL'lik cikis bir kayip degil, portfoyden
+        # nakde donen paradir. Getiri rakaminin yanina yapistirilirsa ikisi tek
+        # bir buyukluk gibi okunur.
+        flow = analysis.flow_note(period)
+        if flow:
+            lines.append(f"    ↳ {flow}\n", style="dim")
+
+    # Kapanan fon tablodan dustugu icin "hesaba katilmamis" saniliyor; tam
+    # tersini soyluyoruz.
+    closed_note = analysis.closed_note
+    if closed_note:
+        lines.append(f"{closed_note}\n", style="yellow")
 
     profit = analysis.total_profit
     if profit is not None:
         lines.append("Toplam Kar/Zarar        ", style="bold")
         lines.append(fmt_money_change(profit), style=_tone(profit))
         lines.append(f"   ({fmt_pct(analysis.total_profit_pct)})", style="dim")
+        lines.append("\n")
+
+    window = analysis.window_label("aylik")
+    if analysis.window("aylik"):
+        # Kafa karisikliginin kaynagi buydu: "Aylık" ay basindan bu yana diye
+        # okunabiliyordu. Olculen pencereyi acikca yaziyoruz.
+        lines.append("Ölçüm                   ", style="bold")
+        lines.append(f"{window} (ay başından değil)", style="dim")
+        lines.append("\n")
+        # Toplam yuzdenin PAYDASI: donem basindaki sermaye. Donem icinde giren
+        # para tabana degil, yalnizca paya katiliyor (bkz.
+        # analytics._flow_adjusted_change).
+        lines.append("Taban                   ", style="bold")
+        lines.append(config.TOTAL_BASIS_SHORT, style="dim")
+        lines.append("\n")
+
+    summary = _track_summary(track_record, analysis.target_monthly_return)
+    if summary:
+        lines.append("Takvim ayı karnesi      ", style="bold")
+        lines.append(summary, style="dim")
         lines.append("\n")
 
     lines.append("\n")
@@ -175,10 +285,10 @@ def _render_rich(analysis: PortfolioAnalysis) -> None:
     console.print()
 
 
-def _render_plain(analysis: PortfolioAnalysis) -> None:
+def _render_plain(analysis: PortfolioAnalysis, track_record: list) -> None:
     header = (
         f"{'Fon':<6}{'Adet':>14}{'Fiyat':>13}{'Değer':>18}"
-        f"{'Ağırlık':>10}{'Günlük':>11}{'Haftalık':>11}{'Aylık':>11}"
+        f"{'Ağırlık':>10}{'Günlük':>13}{'Haftalık':>13}{'Aylık':>13}"
     )
     print()
     print(f"TEFAS Portföyü · {analysis.as_of:%d.%m.%Y}")
@@ -189,25 +299,54 @@ def _render_plain(analysis: PortfolioAnalysis) -> None:
         print(
             f"{row.code:<6}{fmt_units(row.units):>14}{fmt_number(row.price, 6):>13}"
             f"{fmt_money(row.value):>18}{'%' + fmt_number(row.weight_pct, 1):>10}"
-            f"{_return_text(row, 'gunluk'):>11}"
-            f"{_return_text(row, 'haftalik'):>11}"
-            f"{_return_text(row, 'aylik'):>11}"
+            f"{_return_text(row, 'gunluk'):>13}"
+            f"{_return_text(row, 'haftalik'):>13}"
+            f"{_return_text(row, 'aylik'):>13}"
+        )
+    # Kapanan pozisyonlar: govdenin ALTINDA, ayirici cizginin ardinda. Holding
+    # degil (adet/fiyat/deger/agirlik bos) ama periyot kolonlarindaki TL'ler
+    # ozetteki rakami tutturuyor.
+    closed_label = analysis.closed_label
+    if closed_label:
+        print(
+            f"{'Kapanan':<6}{closed_label:>14}{'':>13}{'':>18}{'':>10}"
+            + "".join(
+                f"{fmt_money_change(analysis.closed_value_change(period)):>13}"
+                for period in ("gunluk", "haftalik", "aylik")
+            )
         )
     print("-" * len(header))
 
     for row in analysis.partial_rows():
         print(f"  * {row.code}: {row.partial_note}")
 
+    print(f"  {config.COLUMN_BASIS_NOTE}")
+    if any(row.flow_periods for row in analysis.all_rows):
+        print(f"  {config.FLOW_MARK_NOTE}")
+
     print(f"Toplam Portföy Değeri : {fmt_money(analysis.total_value)}")
     for period, label in config.PERIOD_LABELS.items():
         print(
             f"Ağırlıklı {label:<9}   : "
             f"{fmt_pct(analysis.weighted_returns.get(period))}"
+            f"  ({fmt_money_change(analysis.value_change(period))})"
         )
+        flow = analysis.flow_note(period)
+        if flow:
+            print(f"  akış                : {flow}")
+    closed_note = analysis.closed_note
+    if closed_note:
+        print(f"Kapanan pozisyon      : {closed_note}")
     profit = analysis.total_profit
     if profit is not None:
         print(f"Toplam Kar/Zarar      : {fmt_money_change(profit)} "
               f"({fmt_pct(analysis.total_profit_pct)})")
+    if analysis.window("aylik"):
+        print(f"Ölçüm                 : {analysis.window_label('aylik')} (ay başından değil)")
+    print(f"Taban                 : {config.TOTAL_BASIS_NOTE}")
+    summary = _track_summary(track_record, analysis.target_monthly_return)
+    if summary:
+        print(f"Takvim ayı karnesi    : {summary}")
     print(f"Hedef (aylık)         : %{fmt_number(analysis.target_monthly_return)}")
     gap = analysis.target_gap
     if gap is None:
@@ -225,8 +364,22 @@ def _render_plain(analysis: PortfolioAnalysis) -> None:
 
 def print_holdings(portfolio) -> None:
     """Fiyat cekmeden sadece kayitli adetleri ve alis bilgisini listeler."""
+    # Kapanmis pozisyonlar listede yer almaz (elde adet yok) ama tamamen
+    # gorunmez de olmamali: islem gecmisleri duruyor ve sorulabiliyor.
+    # Bu hesap `is_empty()` kontrolunden ONCE yapilir: her seyini satmis
+    # kullanicida portfoy "bos" sayilir ve tam da gecmisin en cok arandigi anda
+    # kayitlarin durdugunu ogrenmenin hicbir yolu kalmazdi.
+    closed = portfolio.closed_codes
+    closed_note = (
+        f"Kapanmış pozisyon: {', '.join(closed)} "
+        f"({invocation()} lots {closed[0]} ile işlem geçmişi ve gerçekleşen kâr/zarar)"
+    ) if closed else None
+
     if portfolio.is_empty():
-        print(f"Portföy boş. Örnek: {invocation()} add TLY 1000 --date 2026-08-03")
+        if closed_note:
+            print(f"Açık pozisyon yok. {closed_note}")
+        else:
+            print(f"Portföy boş. Örnek: {invocation()} add TLY 1000 --date 2026-08-03")
         return
 
     undated = portfolio.undated_codes()
@@ -261,6 +414,8 @@ def print_holdings(portfolio) -> None:
             f"Hedef aylık getiri: %{fmt_number(portfolio.target_monthly_return)}",
             style="dim",
         )
+        if closed_note:
+            console.print(closed_note, style="dim")
         if hint:
             console.print(hint, style="yellow")
     else:
@@ -273,6 +428,8 @@ def print_holdings(portfolio) -> None:
                 f"  alış: {acquired.strftime('%d.%m.%Y') if acquired else '—'}"
             )
         print(f"Hedef aylık getiri: %{fmt_number(portfolio.target_monthly_return)}")
+        if closed_note:
+            print(closed_note)
         if hint:
             print(hint)
 
@@ -305,10 +462,29 @@ HELP_SECTIONS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ),
     ),
     (
+        "Emir ve valör",
+        (
+            ("emir CODE UNITS --sat", "Satış emri; gerçekleşme gününü valörden türetir"),
+            ("emir ... --tarih GG.AA.YYYY", "Emri verdiğiniz gün"),
+            ("emir ... --saat SS:DD", "Emir saati; kesim 13:30, sonrası ertesi güne kayar"),
+            ("emir ... --nakit GG.AA.YYYY", "Aracı kurumun nakit tarihi — zinciri doğrular"),
+            ("bekleyen", "Gerçekleşmeyi bekleyen emirleri gösterir"),
+            ("valor [CODE]", "Fon valör kurallarını gösterir/düzenler"),
+        ),
+    ),
+    (
         "Rapor",
         (
             ("status", "Güncel fiyatlarla tabloyu terminalde gösterir"),
             ("report", "Tablo + Excel + grafik üretir, ayarlıysa e-posta gönderir"),
+        ),
+    ),
+    (
+        "Web arayüzü",
+        (
+            ("web", "Tarayıcı arayüzünü başlatır (http://127.0.0.1:8000)"),
+            ("web --open", "Arayüzü açar ve tarayıcıyı da başlatır"),
+            ("web --port N", "Başka bir port kullanır"),
         ),
     ),
     (
@@ -385,8 +561,10 @@ def help_examples() -> tuple[str, ...]:
         f"{run} add DFI 300 --accumulate --date 05.08.2026 --price 12.4",
         f"{run} add DFI -300 --accumulate --date 07.08.2026   # kısmi satış",
         f"{run} lots TMV",
+        f"{run} emir PHE 69991 --sat --tarih 01.09.2026 --saat 15:00 --nakit 04.09.2026",
         f"{run} status",
         f"{run} report --show --theme dark",
+        f"{run} web --open                       # tarayıcı arayüzü",
         f"{run} --data-file ~/alt.json status  # ikinci bir portföy",
     )
 

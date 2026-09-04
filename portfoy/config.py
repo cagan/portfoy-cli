@@ -12,6 +12,15 @@ CACHE_DIR = DATA_DIR / "cache"
 
 PORTFOLIO_FILE = DATA_DIR / "portfoy.json"
 MAIL_CONFIG_FILE = DATA_DIR / "mail.json"
+# Gunluk portfoy anlik goruntuleri: takvim ayi karnesinin GERCEKLESEN kolu
+# buradan beslenir (bkz. portfoy/snapshots.py).
+SNAPSHOT_FILE = DATA_DIR / "gecmis.json"
+# Fon bazli valor kurallari (emir gununden gerceklesme gununu turetmek icin).
+# TEFAS valoru yayinlamadigi icin elle beslenir; bkz. portfoy/valor.py.
+VALOR_FILE = DATA_DIR / "valor.json"
+# Verilmis ama henuz gerceklesmemis emirler: gerceklesme gunu belli, o gunun
+# fiyati henuz yayimlanmamis. Fiyat gelince islem kaydina donusur.
+PENDING_FILE = DATA_DIR / "bekleyen.json"
 
 # --- Portfoy varsayilanlari ------------------------------------------------
 DEFAULT_FUNDS = ("TLY", "DFI", "TMV", "PBR")
@@ -20,7 +29,26 @@ DEFAULT_TARGET_MONTHLY_RETURN = 12.0  # yuzde
 # --- Veri cekme ------------------------------------------------------------
 # TEFAS hafta sonu / resmi tatillerde fiyat yayinlamaz. 30 gunluk getiriyi
 # hesaplayabilmek icin fazladan tampon birakiyoruz.
-LOOKBACK_DAYS = 50
+#
+# Karnede gosterilecek en fazla KAPANMIS takvim ayi. Veri daha azsa eldeki
+# kadari gosterilir; daha fazlaysa en yeniler alinir. `--months` ile artirilir.
+#
+# Varsayilan bilerek kisa: karne heniz "temsili" kolda calisiyor, yani gecmis
+# aylar BUGUNKU agirliklarla canlandiriliyor. Portfoy o aylarda bu bilesimde
+# degilse rakam gercek performans degildir - uzun bir gecmis, guven verdigi
+# olcude yaniltir. Anlik goruntuler birikip aylar "gerceklesen"e dondukce
+# `--months` ile pencereyi genisletmek anlamli hale gelir.
+TRACK_RECORD_MONTHS = 3
+
+# Cekilecek gecmis. Karne penceresinden TURETILIR: N kapanmis ay icin N ay +
+# taban ayi + icinde bulunulan ay gerekir. Sabit bir sayi olsaydi `--months`
+# buyutuldugunde fetch penceresi yetmez, karne sessizce kirpilirdi.
+def lookback_for(months: int = TRACK_RECORD_MONTHS) -> int:
+    """Karne penceresini karsilayan gun sayisi (en az 50)."""
+    return max(50, (months + 2) * 31)
+
+
+LOOKBACK_DAYS = lookback_for()
 HTTP_TIMEOUT = 20  # saniye
 HTTP_RETRIES = 3
 CACHE_TTL_SECONDS = 60 * 60 * 3  # 3 saat
@@ -49,6 +77,50 @@ PERIOD_LABELS = {
     "haftalik": "Haftalık",
     "aylik": "Aylık",
 }
+
+# Periyodun HANGI pencereyi olctugunu soyleyen uzun ad. "Aylik" etiketi tek
+# basina "ay basindan bu yana" diye okunabiliyordu; oysa olculen sey kayan
+# 1 aylik penceredir (bir ay onceki ayni takvim gunu -> bugun).
+PERIOD_WINDOW_LABELS = {
+    "gunluk": "Önceki işlem günü",
+    "haftalik": "Son 7 gün",
+    "aylik": "Son 1 ay",
+}
+
+# --- Kolon tabani aciklamalari --------------------------------------------
+# Fon satirindaki "%" ile "₺" AYNI SEYI OLCMUYOR ve bunun ekranda yazmasi sart:
+#
+#   %  -> fonun BIRIM FIYAT getirisi (analytics.compute_returns)
+#   ₺  -> portfoye yansiyan kazanc (analytics._flow_adjusted_change), yani
+#         donem ICINDE alinan/satilan adet dikkate alinarak
+#
+# Donem icinde islem yoksa ikisi birebir tutar. Islem varsa ayrisirlar ve bu
+# bir HATA DEGIL: TMV 13.08'de alim yaptigi icin aylik %25,74 (birim fiyat)
+# ama +%39,32 (portfoye yansiyan) - fon ay basindan beri elde tutulmus gibi
+# degil, gercekte tutulan adetle olculuyor. TL tarafi dogru olan taraftir;
+# eskiden TL yuzdeden turetiliyordu ve TMV'nin aylik TL'si 150.980,60 ₺ diye
+# sisik cikiyordu (gercegi 137.616,06 ₺).
+#
+# Metinler burada duruyor ki konsol, web, Excel ve e-posta ayni cumleyi
+# gostersin; dort ayri kopya kacinilmaz olarak ayrisir.
+COLUMN_BASIS_NOTE = (
+    "% = fonun birim fiyat getirisi · "
+    "₺ = portföye yansıyan kazanç (dönem içi alım/satım düzeltilmiş)"
+)
+# Kirpilmis periyot isareti "*" ile CAKISMASIN diye ayri sembol.
+FLOW_MARK = "†"
+FLOW_MARK_NOTE = (
+    "† dönem içinde alım/satım var — yüzde ile ₺ aynı tabandan çıkmaz"
+)
+TOTAL_BASIS_NOTE = "Toplam getiri, dönem başındaki sermayenin getirisidir."
+# Dar yerler (konsol ozet paneli) icin kisa bicim: orada "Taban" etiketi zaten
+# cumlenin oznesini veriyor, tam cumle satiri sardirip okunaksiz yapiyordu.
+TOTAL_BASIS_SHORT = "dönem başındaki sermaye"
+
+AY_ADLARI = (
+    "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran",
+    "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık",
+)
 
 # --- E-posta ---------------------------------------------------------------
 # Kimlik bilgileri BURAYA YAZILMAZ. Ortam degiskeni, sistem anahtarligi veya
@@ -83,6 +155,13 @@ PALETTES = {
         "axis": "#c3c2b7",
         "positive": "#006300",
         "negative": "#d03b3b",
+        # Katki/degisim grafiklerinde isaret (polarite) rengi. Metindeki
+        # yesil/kirmizi burada kullanilmaz: yesil-kirmizi cifti renk korlugunde
+        # ayirt edilemiyor (protan ΔE 4,6). Mavi-kirmizi ayni islevi gorur ve
+        # tum CVD kontrollerinden gecer (ΔE 23,8).
+        "up": "#2a78d6",
+        "down": "#d03b3b",
+        "neutral_bar": "#52514e",  # toplam/ozet cubugu - seri rengi degil
     },
     "dark": {
         "series": [
@@ -104,6 +183,9 @@ PALETTES = {
         "axis": "#383835",
         "positive": "#0ca30c",
         "negative": "#d03b3b",
+        "up": "#3987e5",
+        "down": "#d03b3b",
+        "neutral_bar": "#c3c2b7",
     },
 }
 
@@ -114,6 +196,30 @@ def series_color(index: int, theme: str = "light") -> str:
     if index < len(palette):
         return palette[index]
     return PALETTES[theme]["muted"]
+
+
+def yan_dosyalar(data_file: Path | None) -> dict[str, Path]:
+    """Portfoy dosyasina eslik eden yan dosyalarin yollari.
+
+    Gecmis, bekleyen emirler ve valor kurallari portfoye BAGLIDIR. Sabit yola
+    yazsalardi alternatif bir portfoy dosyasiyla calismak (test portfoyu, ikinci
+    hesap) asil portfoyun karnesini, emirlerini ve valor tablosunu bozardi.
+
+    Tek yerde durmalarinin sebebi: CLI ve web ayni kurali kullansin. Iki ayri
+    kopya kacinilmaz olarak ayrisir ve ayrildiginda hata "yanlis dosyaya
+    yazildi" seklinde, yani en gec fark edilen bicimde ortaya cikar.
+    """
+    # `resolve()` sart: `--data-file veri/portfoy.json` (goreli) ham
+    # karsilastirmada PORTFOLIO_FILE'a esit CIKMAZ ve gercek gecmis/bekleyen/
+    # valor dosyalari sessizce gorunmez olurdu - duran bir satis emri raporda
+    # kaybolur, karne sifirdan baslardi.
+    if data_file is None or data_file.resolve() == PORTFOLIO_FILE.resolve():
+        return {"gecmis": SNAPSHOT_FILE, "bekleyen": PENDING_FILE, "valor": VALOR_FILE}
+    return {
+        "gecmis": data_file.with_name(f"{data_file.stem}_gecmis.json"),
+        "bekleyen": data_file.with_name(f"{data_file.stem}_bekleyen.json"),
+        "valor": data_file.with_name(f"{data_file.stem}_valor.json"),
+    }
 
 
 def ensure_dirs() -> None:

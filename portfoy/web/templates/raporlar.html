@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% set aktif = 'raporlar' %}
+{% block baslik %}Raporlar{% endblock %}
+
+{% block icerik %}
+{% if sonuc is not none and sonuc.track_record %}
+<section class="kart">
+  <h2>Takvim ayı karnesi</h2>
+  <p class="aciklama">
+    <strong>Gerçekleşen</strong> = o ay kayıtlı portföy görüntülerinden, dış para
+    akışından arındırılmış gerçek getiri. <strong>Temsili</strong> = o ay için
+    portföy kaydı yok; fonların gerçek ay getirileri <em>bugünkü</em> ağırlıklarla
+    toplandı — geriye dönük bir canlandırma, gerçekleşmiş performans değil.
+  </p>
+  <div class="tablo-kaydir">
+  <table>
+    <thead><tr><th>Ay</th><th class="sag">Getiri</th><th>Kaynak</th><th class="sag">Hedefe fark</th></tr></thead>
+    <tbody>
+    {% for ay in sonuc.track_record %}
+      <tr class="{{ 'acik-ay' if not ay.closed }}">
+        <td>{{ ay.label }}{% if not ay.closed %} <span class="kucuk">(devam ediyor)</span>{% endif %}</td>
+        <td class="sag {{ 'artı' if ay.ret > 0 else ('eksi' if ay.ret < 0 else '') }}">
+          {{ fmt_pct(ay.ret) }}
+        </td>
+        <td><span class="rozet {{ 'iyi' if ay.is_actual else 'notr' }}">
+          {{ 'gerçekleşen' if ay.is_actual else 'temsili' }}</span></td>
+        <td class="sag">
+          {% set fark = ay.ret - sonuc.analysis.target_monthly_return %}
+          <span class="{{ 'artı' if fark >= 0 else 'eksi' }}">
+            {{ '+' if fark >= 0 else '−' }}{{ fmt_number(fark|abs) }} puan
+          </span>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endif %}
+
+<section class="kart">
+  <h2>Çıktı üret</h2>
+  {% if sonuc is none and veri_hatasi %}
+    <p class="aciklama">Fiyat verisi alınamadığı için rapor üretilemiyor.
+       Portföy kaydınız duruyor; bağlantı düzelince tekrar deneyin.</p>
+  {% elif sonuc is none %}
+    <p class="aciklama">Açık pozisyon yok; rapor üretilemiyor.</p>
+  {% else %}
+  <form method="post" action="/raporlar" class="izgara">
+    <label>Tema
+      <select name="theme">
+        {% for tema in temalar %}<option value="{{ tema }}">{{ 'Açık' if tema == 'light' else 'Koyu' }}</option>{% endfor %}
+      </select>
+    </label>
+    <fieldset class="tam">
+      <legend>Katkı grafiği periyotları</legend>
+      {% for periyot in periyotlar %}
+        <label class="onay">
+          <input type="checkbox" name="periods" value="{{ periyot }}"
+                 {{ 'checked' if periyot in ['haftalik', 'aylik'] }}>
+          {{ PERIOD_LABELS[periyot] }}
+        </label>
+      {% endfor %}
+    </fieldset>
+    <label class="onay"><input type="checkbox" name="excel" value="true" checked> Excel raporu</label>
+    <label class="onay"><input type="checkbox" name="charts" value="true" checked> Grafikler</label>
+    <button type="submit" class="tam">Üret</button>
+  </form>
+  {% endif %}
+</section>
+
+<section class="kart">
+  <h2>Dosyalar</h2>
+  {% if ciktilar %}
+    {# Boyut/tarih servis katmaninda okundu: sablonda `stat()` cagirmak,
+       listeleme ile render arasinda silinen dosyada sayfayi 500'lerdi. #}
+    <ul class="dosyalar">
+    {% for dosya in ciktilar %}
+      <li>
+        <a href="/indir/{{ dosya.ad }}">{{ dosya.ad }}</a>
+        <span class="kucuk">{{ dosya.kb }} KB</span>
+      </li>
+    {% endfor %}
+    </ul>
+
+    {% set grafikler = ciktilar | selectattr('png_mi') | list %}
+    {% if grafikler %}
+      <div class="galeri">
+        {% for g in grafikler %}
+          <figure>
+            <a href="/indir/{{ g.ad }}"><img src="/indir/{{ g.ad }}" alt="{{ g.baslik }}" loading="lazy"></a>
+            <figcaption>{{ g.baslik }}</figcaption>
+          </figure>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% else %}
+    <p class="aciklama">Henüz çıktı yok. Yukarıdaki formla üretin.</p>
+  {% endif %}
+</section>
+{% endblock %}

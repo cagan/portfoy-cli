@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% set aktif = 'eposta' %}
+{% block baslik %}E-posta{% endblock %}
+
+{% block icerik %}
+<section class="kart">
+  <div class="kart-ust">
+    <h2>SMTP ayarları</h2>
+    <span class="rozet {{ 'iyi' if ayar.is_ready else 'kotu' }}">
+      {{ 'HAZIR' if ayar.is_ready else 'EKSİK' }}
+    </span>
+  </div>
+
+  {% if not ayar.is_ready %}
+    <p class="aciklama">Eksik: {{ ayar.missing_fields() | join(', ') }}</p>
+  {% endif %}
+
+  <p class="kucuk">
+    Gmail için normal hesap şifreniz değil, <strong>uygulama şifresi</strong> gerekir.
+    Şifre öncelikle sistem anahtarlığına yazılır; anahtarlık yoksa
+    <code>veri/mail.json</code> dosyasına (yalnız size okunur izinle) düşer.
+    Kayıtlı şifre bu sayfada hiçbir zaman gösterilmez.
+  </p>
+
+  <form method="post" action="/eposta" class="izgara">
+    <label>Gönderen adres
+      <input name="user" type="email" required value="{{ ayar.user }}" placeholder="ad@gmail.com">
+    </label>
+    <label>Alıcılar
+      <input name="recipients" value="{{ ayar.recipients | join(', ') }}"
+             placeholder="bos birakilirsa kendinize gider">
+      <span class="ipucu">Virgülle ayırın</span>
+    </label>
+    <label>Uygulama şifresi
+      <input name="password" type="password" autocomplete="new-password"
+             placeholder="{{ 'kayıtlı — değiştirmek için yazın' if ayar.password else 'zorunlu' }}">
+      <span class="ipucu">Boş bırakırsanız mevcut şifre korunur</span>
+    </label>
+    <label>SMTP sunucusu <input name="host" required value="{{ ayar.host }}"></label>
+    <label>Port
+      <input name="port" type="number" min="1" max="65535" required value="{{ ayar.port }}">
+      <span class="ipucu">465 = SSL, 587 = STARTTLS</span>
+    </label>
+    <button type="submit" class="tam">Kaydet</button>
+  </form>
+</section>
+
+<section class="kart">
+  <h2>Deneme gönderimi</h2>
+  <p class="aciklama">
+    Gerçek rapordaki gövdenin aynısını gönderir. Ekleri de işaretlerseniz
+    Raporlar sayfasındaki mevcut dosyalar iliştirilir.
+  </p>
+  <form method="post" action="/eposta/gonder" class="satir">
+    <label class="onay">
+      <input type="checkbox" name="ekle" value="true" {{ 'disabled' if not ciktilar }}>
+      Mevcut çıktıları ekle ({{ ciktilar | length }} dosya)
+    </label>
+    <button type="submit" {{ 'disabled' if not ayar.is_ready }}>Gönder</button>
+  </form>
+  {% if not ayar.is_ready %}
+    <p class="kucuk">Ayarlar tamamlanmadan gönderim yapılamaz.</p>
+  {% endif %}
+</section>
+{% endblock %}

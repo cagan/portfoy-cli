@@ -1,5 +1,12 @@
-# Calisma zamani bagimliliklari. pyproject.toml da ayni listeyi tasir;
-# birini degistirirken digerini de guncelleyin.
+# `pip install -r requirements.txt` bu dosyadaki HER SEYI kurar. Gercekten
+# opsiyonel olan ekstralar icin pyproject.toml kullanin:
+#     pip install 'portfoy-cli[web]'        # web arayuzu
+#     pip install 'portfoy-cli[keyring]'    # SMTP sifresini anahtarliga yaz
+#     pip install 'portfoy-cli[test]'       # pytest
+# Bu dosya "hepsi kurulu bir gelistirme ortami" icindir; pyproject.toml ise
+# hangisinin zorunlu oldugunu soyler. Birini degistirirken digerini de guncelleyin.
+
+# --- Zorunlu ---------------------------------------------------------------
 requests>=2.31.0
 pandas>=2.1.0
 openpyxl>=3.1.2
@@ -7,6 +14,16 @@ matplotlib>=3.8.0
 rich>=13.7.0
 tefas-crawler>=0.3.4
 
-# Opsiyonel: SMTP uygulama şifresini macOS Anahtar Zinciri'nde saklar.
-# Kurulu değilse şifre ortam değişkeninden veya veri/mail.json'dan okunur.
+# --- Web arayuzu (`portfoy web`) -------------------------------------------
+fastapi>=0.115
+uvicorn[standard]>=0.30
+jinja2>=3.1
+python-multipart>=0.0.9
+
+# --- SMTP sifresini macOS Anahtar Zinciri'nde saklar -----------------------
+# Kurulu degilse sifre ortam degiskeninden veya veri/mail.json'dan okunur.
 keyring>=25.0.0
+
+# --- Testler ---------------------------------------------------------------
+pytest>=8.0
+httpx>=0.27

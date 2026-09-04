@@ -1,0 +1,326 @@
+{% extends "base.html" %}
+{% set aktif = 'islemler' %}
+{% block baslik %}İşlemler{% endblock %}
+
+{% block icerik %}
+{% if bekleyenler %}
+<section class="kart bekleyen-kart">
+  <h2>Bekleyen emirler ({{ bekleyenler | length }})</h2>
+  <p class="aciklama">
+    Emir verildi, gerçekleşme günü belli — ama o günün değerleme fiyatı henüz
+    yayımlanmadı. Adetler <strong>portföyde kalmaya devam ediyor</strong>: gerçekleşme
+    gününe kadar fiyat riskini siz taşıyorsunuz. Fiyat yayımlandığında kayıt
+    kendiliğinden işlem kaydına dönüşür.
+  </p>
+  <div class="tablo-kaydir">
+  <table>
+    <thead><tr>
+      <th>Fon</th><th>İşlem</th><th class="sag">Adet</th>
+      <th>Emir</th><th>Gerçekleşme</th><th>Nakit</th><th></th>
+    </tr></thead>
+    <tbody>
+    {% for emir in bekleyenler %}
+      <tr>
+        <td><strong>{{ emir.kod }}</strong></td>
+        <td>{{ 'Satış' if emir.satis_mi else 'Alış' }}</td>
+        <td class="sag">{{ fmt_units(emir.adet if emir.adet > 0 else -emir.adet) }}</td>
+        <td>{{ emir.emir_zamani | replace('T', ' ') }}</td>
+        <td><strong>{{ emir.gerceklesme.strftime('%d.%m.%Y') }}</strong>
+          {%- if emir.valor_supheli %}
+            <br><span class="kucuk" title="Türetildiğinde valör kuralı doğrulanmamıştı">valör doğrulanmadı</span>
+          {%- endif %}</td>
+        <td>{{ emir.nakit.strftime('%d.%m.%Y') }}</td>
+        <td>
+          <form method="post" action="/emir/sil" class="satir-ic">
+            <input type="hidden" name="emir_id" value="{{ emir.id }}">
+            <button type="submit" class="ikincil kucuk-buton">İptal</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endif %}
+
+<section class="kart">
+  <h2>Emir ver</h2>
+  <p class="aciklama">
+    <strong>Emri verdiğiniz günü</strong> girin; gerçekleşme ve nakit gününü
+    fonun valörüne göre uygulama hesaplar. TEFAS'ta satış emri, emri verdiğiniz
+    günün fiyatından gerçekleşmez — sonraki bir değerleme gününün fiyatı
+    kullanılır ve kesim saatinden (13:30) sonra verilen emir bir sonraki iş
+    gününe kayar.
+  </p>
+  <form method="post" action="/emir" class="izgara">
+    <label>Fon kodu
+      <input name="code" list="fon-kodlari" required placeholder="PHE" autocapitalize="characters">
+    </label>
+    <label>İşlem türü
+      <select name="tur" required>
+        <option value="satis">Satış</option>
+        <option value="alis">Alış</option>
+      </select>
+    </label>
+    <label>Adet
+      <input name="units" type="number" step="any" min="0" required>
+    </label>
+    <label>Emir günü
+      <input name="emir_tarihi" type="date" max="{{ bugun }}" required>
+    </label>
+    <label>Emir saati
+      <input name="saat" type="time" placeholder="15:00">
+      <span class="ipucu">Bilmiyorsanız aşağıdan seçin</span>
+    </label>
+    <label>Saat bilinmiyorsa
+      <select name="kesim_taraf">
+        <option value="">— saati girdim —</option>
+        <option value="once">13:30'dan ÖNCE verdim</option>
+        <option value="sonra">13:30'dan SONRA verdim</option>
+      </select>
+    </label>
+    <label>Nakit tarihi (aracı kurum ekranı)
+      <input name="nakit_tarihi" type="date">
+      <span class="ipucu">Girerseniz türetilen zincir doğrulanır</span>
+    </label>
+    <label>Gerçekleşen fiyat (biliniyorsa)
+      <input name="price" type="number" step="any" min="0">
+      <span class="ipucu">Boşsa TEFAS değerleme fiyatı beklenir</span>
+    </label>
+    <button type="submit" class="tam">Emri kaydet</button>
+  </form>
+</section>
+
+<section class="kart">
+  <h2>Gerçekleşmiş işlem kaydet</h2>
+  <p class="aciklama">
+    Gerçekleşme günü ve fiyatı zaten biliyorsanız burayı kullanın — valör
+    hesabı yapılmaz, girdiğiniz tarih doğrudan kaydedilir.
+    Satışta tarih ve fiyat zorunludur: gerçekleşmiş kâr/zarar ve aylık karne
+    yalnızca onlardan hesaplanabiliyor.
+  </p>
+  <form method="post" action="/islemler" class="izgara">
+    <label>Fon kodu
+      <input name="code" list="fon-kodlari" required placeholder="TMV" autocapitalize="characters">
+    </label>
+    <datalist id="fon-kodlari">
+      {% for kod in acik_kodlar %}<option value="{{ kod }}">{% endfor %}
+    </datalist>
+
+    <label>İşlem türü
+      <select name="tur" required>
+        <option value="alis">Alış</option>
+        <option value="satis">Satış</option>
+      </select>
+    </label>
+
+    <label>Adet
+      <input name="units" type="number" step="any" min="0" required placeholder="1000">
+    </label>
+
+    <label>Tarih
+      <input name="date" type="date" max="{{ bugun }}">
+      <span class="ipucu">İşlemin gerçekleştiği gün</span>
+    </label>
+
+    <label>Birim fiyat (₺)
+      <input name="price" type="number" step="any" min="0" placeholder="8,613999">
+      <span class="ipucu">Maliyet ve kâr/zarar bundan hesaplanır</span>
+    </label>
+
+    <label class="onay tam">
+      <input type="checkbox" name="force" value="true">
+      TEFAS doğrulamasını atla (kodun doğru olduğundan eminseniz)
+    </label>
+
+    <button type="submit" class="tam">Kaydet</button>
+  </form>
+  <p class="kucuk">
+    <strong>Satış valörü:</strong> TEFAS'ta satış emri, emri verdiğiniz günün fiyatından
+    gerçekleşmez — sonraki bir değerleme gününün fiyatı kullanılır. Buraya emrin
+    <em>gerçekleştiği</em> günü ve fiyatı yazın; paranın hesaba geçtiği tarihi değil.
+  </p>
+</section>
+
+<section class="kart">
+  <h2>Portföy</h2>
+  {% if portfoy.all_codes %}
+    <div class="tablo-kaydir">
+    <table>
+      <thead><tr>
+        <th>Fon</th><th class="sag">Adet</th><th>Alış</th>
+        <th class="sag">Ort. maliyet</th><th class="sag">Gerçekleşen</th><th>İşlem</th>
+      </tr></thead>
+      <tbody>
+      {% for kod in portfoy.all_codes %}
+        {% set p = portfoy.positions[kod] %}
+        <tr class="{{ 'kapanmis' if p.is_closed }}">
+          <td><strong>{{ kod }}</strong>
+            {% if p.is_closed %}<span class="rozet kucuk-rozet">KAPANDI
+              {%- if p.closed_on %} {{ p.closed_on.strftime('%d.%m.%Y') }}{% endif %}</span>{% endif %}
+          </td>
+          <td class="sag">{{ '—' if p.is_closed else fmt_units(p.units) }}</td>
+          <td>{{ p.acquired_on.strftime('%d.%m.%Y') if p.acquired_on else '—' }}</td>
+          <td class="sag">{{ fmt_price(p.average_cost) if p.average_cost else '—' }}</td>
+          <td class="sag {{ 'artı' if p.realized_profit and p.realized_profit > 0 else ('eksi' if p.realized_profit and p.realized_profit < 0 else '') }}">
+            {% if p.realized_profit is none %}
+              {% if p.realized_proceeds is not none %}
+                <span class="kucuk" title="Eşleşen alış lotunda fiyat yok">hasılat {{ fmt_money(p.realized_proceeds) }}</span>
+              {% else %}—{% endif %}
+            {% else %}
+              {{ '+' if p.realized_profit >= 0 else '−' }}{{ fmt_money(p.realized_profit if p.realized_profit >= 0 else -p.realized_profit) }}
+            {% endif %}
+          </td>
+          <td>
+            <details>
+              <summary class="kucuk">{{ p.lots | length }} kayıt</summary>
+              <table class="ic-tablo">
+                {% for lot in p.lots %}
+                <tr>
+                  <td>{{ lot.date.strftime('%d.%m.%Y') if lot.date else 'tarih yok' }}</td>
+                  <td class="sag">{{ fmt_units(lot.units if lot.units > 0 else -lot.units) }}</td>
+                  <td>{{ 'alış' if lot.units > 0 else 'satış' }}</td>
+                  <td class="sag">{{ fmt_price(lot.price) ~ ' ₺' if lot.price is not none else 'fiyat yok' }}</td>
+                </tr>
+                {% endfor %}
+              </table>
+            </details>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  {% else %}
+    <p class="aciklama">Henüz kayıt yok.</p>
+  {% endif %}
+</section>
+
+<section class="kart">
+  <h2>Valör kuralları</h2>
+  <p class="aciklama">
+    Emirden gerçekleşme gününü türetmek için kullanılır. <strong>TEFAS valör
+    bilgisini yayınlamıyor</strong> — kategori varsayılanları bir başlangıç
+    noktasıdır ve doğrulanana kadar <em>şüpheli</em> sayılır. Doğrulamanın yolu:
+    bir emirde nakit tarihini girin; tutuyorsa kural doğrulanmış demektir.
+  </p>
+  {% if valor_kurallari %}
+    <div class="tablo-kaydir">
+    <table>
+      <thead><tr><th>Fon</th><th>Alış</th><th>Satış</th><th>Durum</th></tr></thead>
+      <tbody>
+      {% for kod, k in valor_kurallari.items() | sort %}
+        <tr>
+          <td><strong>{{ kod }}</strong></td>
+          <td>T+{{ k.alis_valor }} fiyat · T+{{ k.alis_nakit }} nakit</td>
+          <td>T+{{ k.satis_valor }} fiyat · T+{{ k.satis_nakit }} nakit</td>
+          <td>
+            {% if k.supheli %}
+              <span class="rozet kotu">ŞÜPHELİ</span>
+            {% else %}
+              <span class="rozet iyi">DOĞRULANDI {{ k.dogrulandi.strftime('%d.%m.%Y') }}</span>
+            {% endif %}
+            <span class="kucuk">{{ k.kaynak }}</span>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  {% else %}
+    <p class="kucuk">Kayıtlı kural yok; kategori varsayılanları kullanılıyor.</p>
+  {% endif %}
+
+  {# Kayitli her fon icin AYRI form: alanlar o fonun MEVCUT degerleriyle
+     doldurulur. Tek bir sabit form olsaydi (value="1/1/1/2") Para Piyasasi
+     fonunun (0,0,0,1) kuralinda tek alani duzeltmek isteyen kullanici
+     digerlerini farkinda olmadan sifirlardi. #}
+  {% for kod, k in valor_kurallari.items() | sort %}
+  <details>
+    <summary class="kucuk">{{ kod }} kuralını düzelt</summary>
+    <form method="post" action="/valor" class="izgara">
+      <input type="hidden" name="code" value="{{ kod }}">
+      <label>Alış valörü (T+) <input name="alis_valor" type="number" min="0" max="10" value="{{ k.alis_valor }}" required></label>
+      <label>Alış nakit (T+) <input name="alis_nakit" type="number" min="0" max="10" value="{{ k.alis_nakit }}" required></label>
+      <label>Satış valörü (T+) <input name="satis_valor" type="number" min="0" max="10" value="{{ k.satis_valor }}" required></label>
+      <label>Satış nakit (T+) <input name="satis_nakit" type="number" min="0" max="10" value="{{ k.satis_nakit }}" required></label>
+      <label class="onay tam">
+        <input type="checkbox" name="dogrula" value="true">
+        Doğrulanmış işaretle (izahnameden veya nakit tarihi mutabakatından teyit ettim)
+      </label>
+      <button type="submit" class="tam">{{ kod }} kuralını kaydet</button>
+    </form>
+  </details>
+  {% endfor %}
+
+  <details>
+    <summary class="kucuk">Yeni fon için kural ekle</summary>
+    <p class="kucuk">Kayıtlı olmayan bir fon için kategori varsayılanının
+       üzerine yazar; verilmeyen alanlar varsayılanda kalır.</p>
+    <form method="post" action="/valor" class="izgara">
+      <label>Fon kodu <input name="code" required list="fon-kodlari" autocapitalize="characters"></label>
+      <label>Alış valörü (T+) <input name="alis_valor" type="number" min="0" max="10" value="1" required></label>
+      <label>Alış nakit (T+) <input name="alis_nakit" type="number" min="0" max="10" value="1" required></label>
+      <label>Satış valörü (T+) <input name="satis_valor" type="number" min="0" max="10" value="1" required></label>
+      <label>Satış nakit (T+) <input name="satis_nakit" type="number" min="0" max="10" value="2" required></label>
+      <label class="onay tam">
+        <input type="checkbox" name="dogrula" value="true">
+        Doğrulanmış işaretle
+      </label>
+      <button type="submit" class="tam">Kaydet</button>
+    </form>
+  </details>
+</section>
+
+<section class="kart">
+  <h2>Aylık getiri hedefi</h2>
+  <form method="post" action="/hedef" class="satir">
+    <label>Hedef (%)
+      <input name="percent" type="number" step="any" required
+             value="{{ fmt_number(portfoy.target_monthly_return) | replace(',', '.') }}">
+    </label>
+    <button type="submit">Ayarla</button>
+  </form>
+</section>
+
+<details class="kart tehlikeli">
+  <summary><h2>Düzeltme ve silme</h2></summary>
+  <p class="aciklama">
+    Bu iki işlem kayıt geçmişini <strong>siler</strong>. Normal alış/satış için
+    yukarıdaki formu kullanın — orası geçmişi korur.
+  </p>
+
+  <h3>Adedi düzelt</h3>
+  <p class="kucuk">Fonun tüm işlem kayıtlarını tek bir kayda indirger. Önceki
+     lotların tarihi ve fiyatı gider. Kapanmış pozisyonlarda reddedilir.</p>
+  <form method="post" action="/adet-duzelt" class="izgara">
+    <label>Fon kodu
+      <select name="code" required>
+        <option value="">— seçin —</option>
+        {% for kod in acik_kodlar %}<option value="{{ kod }}">{{ kod }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Yeni adet <input name="units" type="number" step="any" min="0" required></label>
+    <label>Alış tarihi <input name="date" type="date" max="{{ bugun }}"></label>
+    <label>Birim fiyat (₺) <input name="price" type="number" step="any" min="0"></label>
+    <label class="onay tam">
+      <input type="checkbox" name="onay" value="true"> Önceki işlem kayıtlarının silineceğini anlıyorum
+    </label>
+    <button type="submit" class="tam uyari-buton">Adedi düzelt</button>
+  </form>
+
+  <h3>Fonu sil</h3>
+  <p class="kucuk">Kaydı tamamen kaldırır — kapanmış pozisyonun geçmişi de dahil. Geri alınamaz.</p>
+  <form method="post" action="/fon-sil" class="satir">
+    <label>Fon kodu
+      <select name="code" required>
+        <option value="">— seçin —</option>
+        {% for kod in portfoy.all_codes %}<option value="{{ kod }}">{{ kod }}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="onay"><input type="checkbox" name="onay" value="true"> Onaylıyorum</label>
+    <button type="submit" class="tehlike-buton">Sil</button>
+  </form>
+</details>
+{% endblock %}

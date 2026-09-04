@@ -4,6 +4,17 @@ Bir fon "islem kayitlari" (lot) listesiyle tutulur: her alis/satis icin tarih,
 adet ve fiyat. Elde kalan adet bu lotlarin toplamidir. Tarih bilgisi, fonun
 portfoyde bulunmadigi gunlerin getirisinin portfoye yazilmamasi icin sart
 (bkz. analytics.compute_returns).
+
+Tamami satilan fon KAYITTAN SILINMEZ, "kapanmis pozisyon" olarak durur (adet 0,
+lotlar yerinde). Silinseydi satisin tarihi ve fiyati da giderdi; gerceklesmis
+kar/zarar bir daha hesaplanamaz, gecmis anlik goruntulerdeki cikis akisi
+fiyatsiz kalirdi. Rapor satirlari `codes`/`holdings` uzerinden yalnizca ACIK
+pozisyonlari gorur; kapanmislara `all_codes` ile ulasilir.
+
+TEFAS cekimi ise ucuncu bir listeyi, `codes_for_pricing`i kullanir: acik
+pozisyonlar + YAKIN ZAMANDA kapanmislar. Getiri penceresi icinde satilan fonun
+satis gunune kadarki fiyat hareketi portfoy getirisine giriyor; fiyati
+cekilmezse o hareket sessizce kaybolur (bkz. analytics._flow_adjusted_change).
 """
 
 from __future__ import annotations
@@ -13,7 +24,7 @@ import logging
 import os
 import tempfile
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from . import config
@@ -21,6 +32,14 @@ from . import config
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 2
+
+# Adetler float tutuldugu icin FIFO'da "tam kapandi" karsilastirmalari kucuk bir
+# tolerans ister; yoksa 1e-10'luk artik bir lot elde kalmis gibi gorunur.
+# Ayni toleransi disaridan kullananlar (web katmanindaki "bu kadar adet var mi"
+# kontrolu gibi) EPSILON adiyla erisir; iki ayri esik tutmak, sinirda birbirini
+# tutmayan iki cevap uretirdi.
+EPSILON = 1e-9
+_EPSILON = EPSILON
 
 # ISO once denenir; kalanlar aracı kurum ekranlarindaki Turkce bicimler.
 _DATE_FORMATS = ("%Y-%m-%d", "%d-%m-%Y", "%d.%m.%Y", "%d/%m/%Y")
@@ -52,6 +71,13 @@ class Lot:
     units: float
     date: date | None = None  # None: eski kayit, ne zaman alindigi bilinmiyor
     price: float | None = None
+    # Bu lotu ureten bekleyen emrin kimligi (bkz. portfoy/bekleyen.py).
+    # CIFT ISLEMEYI ONLEYEN SEY BUDUR: emir cozuldugunde portfoy ve bekleyen
+    # dosyasi ayri ayri yazilir; ikisi arasinda bir hata olursa emir hem
+    # islenmis hem bekliyor kalirdi ve sonraki calisma ayni satisi bir kez daha
+    # uygulayip adedi sessizce yok ederdi. Kimlik lotta durdugu icin cozulme
+    # yeniden calistirilabilir (idempotent) hale geliyor.
+    emir_id: str | None = None
 
     def to_dict(self) -> dict:
         payload: dict = {"adet": self.units}
@@ -59,6 +85,8 @@ class Lot:
             payload["tarih"] = self.date.isoformat()
         if self.price is not None:
             payload["fiyat"] = self.price
+        if self.emir_id is not None:
+            payload["emir_id"] = self.emir_id
         return payload
 
     @classmethod
@@ -84,7 +112,11 @@ class Lot:
                 f"'{code}' işlem kaydında geçersiz fiyat: {raw_price!r}"
             ) from None
 
-        return cls(units=units, date=lot_date, price=price)
+        emir_id = raw.get("emir_id")
+        return cls(
+            units=units, date=lot_date, price=price,
+            emir_id=str(emir_id) if emir_id else None,
+        )
 
 
 @dataclass
@@ -97,31 +129,136 @@ class Position:
     def units(self) -> float:
         return sum(lot.units for lot in self.lots)
 
+    def _match_fifo(self) -> tuple[list[tuple[Lot, float]], list[tuple[Lot, Lot, float]]]:
+        """Satislari alislarla FIFO esler. Doner: (elde kalan, kapanmis).
+
+        Elde kalan: (alis lotu, o lottan kalan adet), en eskiden yeniye.
+        Kapanmis  : (alis lotu, satis lotu, eslesen adet) - gerceklesmis
+                    kar/zarar yalnizca bu ucluden cikarilabilir, cunku hangi
+                    alisin hangi satisla kapandigini bilmek gerekir.
+
+        Satista once en eski alis kapanir - Turkiye'de fon satislarinda uygulanan
+        ve aracı kurum ekranlarinin da kullandigi sira budur.
+
+        Tarihsiz lotlar en eski sayilir; bunlar tarih alani eklenmeden once
+        girilmis eski kayitlardir ve pratikte ilk alislardir.
+        """
+        buys = sorted(
+            (lot for lot in self.lots if lot.units > 0),
+            key=lambda lot: lot.date or date.min,
+        )
+        sells = sorted(
+            (lot for lot in self.lots if lot.units < 0),
+            key=lambda lot: lot.date or date.min,
+        )
+
+        open_lots = [[lot, lot.units] for lot in buys]
+        closed: list[tuple[Lot, Lot, float]] = []
+        index = 0
+        for sell in sells:
+            to_close = -sell.units
+            while to_close > _EPSILON and index < len(open_lots):
+                entry = open_lots[index]
+                taken = min(entry[1], to_close)
+                if taken > _EPSILON:
+                    closed.append((entry[0], sell, taken))
+                    entry[1] -= taken
+                    to_close -= taken
+                if entry[1] <= _EPSILON:
+                    index += 1
+
+        remaining = [(lot, left) for lot, left in open_lots if left > _EPSILON]
+        return remaining, closed
+
+    def remaining_lots(self) -> list[tuple[Lot, float]]:
+        """Satislar FIFO ile dusuldukten sonra elde kalan alis lotlari.
+
+        Doner: (lot, o lottan elde kalan adet) ciftleri, en eskiden yeniye.
+        Satis lotlarinin kendi fiyatlari burada kullanilmaz: gerceklesmis
+        kar/zarari ilgilendirir, elde kalanin maliyetini degil.
+        """
+        return self._match_fifo()[0]
+
+    def closed_lots(self) -> list[tuple[Lot, Lot, float]]:
+        """FIFO ile kapanmis (alis, satis, adet) ucluleri."""
+        return self._match_fifo()[1]
+
+    @property
+    def is_closed(self) -> bool:
+        """Alis yapilmis ama elde adet kalmamis pozisyon."""
+        return bool(self.lots) and self.units <= _EPSILON
+
+    @property
+    def closed_on(self) -> date | None:
+        """Pozisyonu kapatan son satisin tarihi; acik pozisyonda None."""
+        if not self.is_closed:
+            return None
+        dates = [lot.date for lot in self.lots if lot.units < 0 and lot.date]
+        return max(dates) if dates else None
+
+    @property
+    def realized_proceeds(self) -> float | None:
+        """Kapanan lotlarin toplam satis hasilati (TL).
+
+        Kar/zarar ile AYNI kumeden hesaplanir (FIFO'da eslesen satislar), yoksa
+        "hasilat" ve "kar" satirlari yan yana basildiginda farkli seyleri
+        toplayip birbirini tutmazlardi.
+        """
+        closed = self.closed_lots()
+        if not closed or any(sell.price is None for _, sell, _ in closed):
+            return None
+        return sum(units * sell.price for _, sell, units in closed)
+
+    @property
+    def realized_profit(self) -> float | None:
+        """Gerceklesmis kar/zarar (TL).
+
+        Eslesen alis veya satis lotlarindan birinin fiyati bilinmiyorsa None -
+        eksik veriyle 0 dondurmek "kar da zarar da etmedim" diye okunurdu.
+        """
+        closed = self.closed_lots()
+        if not closed:
+            return None
+        if any(buy.price is None or sell.price is None for buy, sell, _ in closed):
+            return None
+        return sum(units * (sell.price - buy.price) for buy, sell, units in closed)
+
+    @property
+    def realized_cost(self) -> float | None:
+        """Kapanmis lotlarin toplam maliyeti (TL)."""
+        closed = self.closed_lots()
+        if not closed or any(buy.price is None for buy, _, _ in closed):
+            return None
+        return sum(units * buy.price for buy, _, units in closed)
+
     @property
     def acquired_on(self) -> date | None:
-        """En eski alis tarihi; tek bir lot bile tarihsizse None.
+        """Elde kalan en eski alisin tarihi; biri bile tarihsizse None.
 
         Tarihsiz lot "ne zamandir elimde bilmiyorum" demektir. Bu durumda
         getiriyi kirpmak yerine tam periyodu kullaniriz: eksik veriyle fonu
         oldugundan yeni gostermek, oldugundan eski gostermekten daha yanlis.
+
+        FIFO ile kapanmis lotlar hesaba katilmaz: tamami satilmis bir alis
+        artik portfoyde degildir, getiriyi onun tarihinden baslatmak fonu
+        oldugundan uzun suredir elde tutuluyor gosterir.
         """
-        if not self.lots or any(lot.date is None for lot in self.lots):
+        remaining = self.remaining_lots()
+        if not remaining or any(lot.date is None for lot, _ in remaining):
             return None
-        return min(lot.date for lot in self.lots)
+        return min(lot.date for lot, _ in remaining)
 
     @property
     def cost_basis(self) -> float | None:
         """Elde kalan adedin toplam maliyeti (TL), bilinmiyorsa None.
 
-        Yalnizca butun lotlar alis ve fiyatlari biliniyorsa hesaplanir; satis
-        varsa hangi lotun kapandigi (FIFO/LIFO) belirsiz oldugu icin
-        hesaplamaya girismiyoruz.
+        Satislar FIFO ile dusulur; yalnizca elde kalan lotlarin fiyati gerekir.
+        Kapanmis bir lotun fiyati bilinmese de kalanin maliyeti hesaplanabilir.
         """
-        if not self.lots:
+        remaining = self.remaining_lots()
+        if not remaining or any(lot.price is None for lot, _ in remaining):
             return None
-        if any(lot.price is None or lot.units <= 0 for lot in self.lots):
-            return None
-        return sum(lot.units * lot.price for lot in self.lots)
+        return sum(units * lot.price for lot, units in remaining)
 
     @property
     def average_cost(self) -> float | None:
@@ -150,18 +287,84 @@ class Portfolio:
     # --- Okuma -------------------------------------------------------------
     @property
     def holdings(self) -> dict[str, float]:
-        """Fon kodu -> elde kalan adet (lotlardan turetilir)."""
-        return {code: position.units for code, position in self.positions.items()}
+        """Fon kodu -> elde kalan adet. Kapanmis pozisyonlar yer almaz."""
+        return {code: self.positions[code].units for code in self.codes}
 
     def position(self, code: str) -> Position | None:
+        """Kapanmis pozisyonlar da doner - gecmis islemleri sormak icin."""
         return self.positions.get(normalize_code(code))
 
     @property
     def codes(self) -> list[str]:
+        """ACIK pozisyonlarin kodlari. TEFAS cekimi ve rapor satirlari bunu kullanir.
+
+        Kapanmis fonu buraya koymak, artik elde olmayan bir fon icin fiyat cekip
+        raporda 0 adetlik satir gostermek olurdu.
+        """
+        return sorted(
+            code for code, position in self.positions.items() if not position.is_closed
+        )
+
+    @property
+    def all_codes(self) -> list[str]:
+        """Kapanmislar dahil butun kodlar - islem gecmisi ve diske yazim icin."""
         return sorted(self.positions)
 
+    @property
+    def closed_codes(self) -> list[str]:
+        """Tamami satilmis fonlar."""
+        return sorted(
+            code for code, position in self.positions.items() if position.is_closed
+        )
+
+    def codes_for_pricing(
+        self, lookback_days: int = config.LOOKBACK_DAYS, today: date | None = None
+    ) -> list[str]:
+        """Fiyati CEKILMESI gereken kodlar: acik + yakin zamanda kapanmis.
+
+        `codes` ve `all_codes` semantigi degismedi (bkz. modul docstring):
+        `codes` hala "elde ne var", `all_codes` hala "kayitta ne var". Bu ucuncu
+        liste ayri bir soruyu cevapliyor: HANGI fonlarin fiyat serisi gerekli.
+
+        Kapanmis fon da gerekli, cunku pencere icinde satildiysa satis gunune
+        kadarki fiyat hareketi portfoy getirisine giriyor (bkz.
+        analytics._flow_adjusted_change). Fiyati cekilmezse o fon analizde hic
+        gorunmez ve gunluk getiri, yalnizca hayatta kalan fonlarin ortalamasina
+        doner - 03.09'da PHE tamamen satildiginda ekranda +%0,77 yazarken
+        portfoyun gercekte -%0,04 kaybettigi durum budur.
+
+        Lookback penceresinden ESKI kapanislar disarida kalir: getiri
+        pencerelerinin hicbirine dokunmadiklari icin fiyatlarini cekmek bosuna
+        ag trafigi olurdu. Kapanis tarihi bilinmeyen (satis lotu tarihsiz)
+        pozisyon da disarida kalir - ne zaman kapandigini bilmeden "yakin"
+        saymak, yillar once satilmis her fonu her calistirmada cekmek olurdu.
+        """
+        today = today or date.today()
+        esik = today - timedelta(days=lookback_days)
+        yakin_kapanmis = [
+            code
+            for code in self.closed_codes
+            if (kapanis := self.positions[code].closed_on) is not None
+            and kapanis >= esik
+        ]
+        return sorted(set(self.codes) | set(yakin_kapanmis))
+
     def is_empty(self) -> bool:
-        return not self.positions
+        """Acik pozisyon yoksa bos sayilir; kapanmis kayitlar rapor uretmez."""
+        return not self.codes
+
+    def emir_islendi_mi(self, emir_id: str) -> bool:
+        """Bu emirden uretilmis bir lot zaten var mi.
+
+        Cozulme yeniden calistirilabilir olsun diye: portfoy yazildiktan sonra
+        bekleyen dosyasinin yazimi basarisiz olursa emir yeniden islenmeye
+        calisilir; burasi onu yakalar.
+        """
+        return any(
+            lot.emir_id == emir_id
+            for position in self.positions.values()
+            for lot in position.lots
+        )
 
     def undated_codes(self) -> list[str]:
         """Alis tarihi bilinmeyen fonlar - getiri kirpmasi bunlarda calismaz."""
@@ -175,10 +378,27 @@ class Portfolio:
         on: date | None = None,
         price: float | None = None,
     ) -> None:
-        """Fonu tek bir islem kaydina indirger; onceki lotlar silinir."""
+        """Fonu tek bir islem kaydina indirger; onceki lotlar silinir.
+
+        Kapanmis pozisyonda REDDEDER. Satilmis bir fona yeniden girerken en
+        dogal hamle `add KOD <adet>` oluyor; bu, gerceklesmis kar/zarari ve
+        satis kaydini geri donulmez sekilde silerdi - modulun "kapanmis pozisyon
+        silinmez" sozunun tam tersi. Dogru hamle `--accumulate` ile yeni bir
+        alis lotu eklemek; hata mesaji bunu soyluyor.
+        """
         code = normalize_code(code)
         if units < 0:
             raise ValueError("Adet negatif olamaz.")
+
+        existing = self.positions.get(code)
+        if existing is not None and existing.is_closed:
+            raise ValueError(
+                f"{code} kapanmis bir pozisyon: uzerine yazmak satis kaydini ve "
+                f"gerceklesmis kar/zarari siler. Yeni alis icin: "
+                f"add {code} {units:g} --accumulate --date GG.AA.YYYY --price <fiyat>. "
+                f"Gecmisi gercekten silmek icin once: remove {code}"
+            )
+
         if units == 0:
             self.positions.pop(code, None)
         else:
@@ -190,6 +410,7 @@ class Portfolio:
         units: float,
         on: date | None = None,
         price: float | None = None,
+        emir_id: str | None = None,
     ) -> float:
         """Mevcut fona yeni bir islem ekler. Negatif adet satistir."""
         code = normalize_code(code)
@@ -200,11 +421,11 @@ class Portfolio:
                 f"{code} icin mevcut adet {position.units:g}; {units:g} dusulemez."
             )
 
-        position.lots.append(Lot(float(units), on, price))
-        if new_total == 0:  # tamami satildi -> fon portfoyden cikar
-            self.positions.pop(code, None)
-        else:
-            self.positions[code] = position
+        position.lots.append(Lot(float(units), on, price, emir_id))
+        # Tamami satilsa bile kayit durur: satisin tarihi/fiyati gerceklesmis
+        # kar/zarar ve gecmis anlik goruntulerdeki cikis akisi icin gerekli.
+        # Pozisyon `is_closed` olur, `codes` onu artik dondurmez.
+        self.positions[code] = position
         return new_total
 
     # Eski isim: cagri yerleri tek tek guncellenmesin diye korunuyor.
@@ -218,7 +439,7 @@ class Portfolio:
         return {
             "version": SCHEMA_VERSION,
             "hedef_aylik_getiri": self.target_monthly_return,
-            "fonlar": {code: self.positions[code].to_dict() for code in self.codes},
+            "fonlar": {code: self.positions[code].to_dict() for code in self.all_codes},
         }
 
     @classmethod
@@ -231,8 +452,25 @@ class Portfolio:
         for code, entry in funds_raw.items():
             key = normalize_code(code)
             position = _position_from_entry(entry, key)
-            if position.units > 0:
-                positions[key] = position
+            if not position.lots:
+                continue
+            if position.units < -_EPSILON:
+                # Elde olmayani satmak: elle duzenlenmis dosyada olur. Kaydi
+                # almiyoruz ama SESSIZCE degil - sonraki save bunu kalicilastirir.
+                logger.warning(
+                    "%s: net adet negatif (%g); kayit yok sayildi, "
+                    "sonraki kaydetmede dosyadan silinecek.",
+                    key, position.units,
+                )
+                continue
+            # Adet 0 ise ancak GERCEK bir satisla kapanmissa kapanmis pozisyondur.
+            # Satissiz sifir adet, v1 formatindaki `"KOD": 0` gibi bos bir
+            # kayittir; eskiden dusuruluyordu, hayalet pozisyona donusmesin.
+            if position.units <= _EPSILON and not any(
+                lot.units < 0 for lot in position.lots
+            ):
+                continue
+            positions[key] = position
 
         try:
             target = float(raw.get("hedef_aylik_getiri", config.DEFAULT_TARGET_MONTHLY_RETURN))

@@ -162,7 +162,18 @@ def _write_summary(sheet, frame: pd.DataFrame, analysis: PortfolioAnalysis, row:
         ("Toplam Kar/Zarar", analysis.total_profit, _FMT_MONEY_CHANGE),
         ("Hedef Aylık Getiri", analysis.target_monthly_return, _FMT_PCT),
         ("Hedefe Fark (yüzde puan)", gap, _FMT_POINTS),
-        ("Aylık Değer Değişimi (yaklaşık)", analysis.value_change("aylik"), _FMT_MONEY_CHANGE),
+        ("Haftalık Değer Değişimi", analysis.value_change("haftalik"), _FMT_MONEY_CHANGE),
+        ("Aylık Değer Değişimi", analysis.value_change("aylik"), _FMT_MONEY_CHANGE),
+        # Akis, getiriden ayri bir satir: portfoyden cikan/giren para kar/zarar
+        # degildir ama toplam degerin neden degistigini aciklayan tek sey odur.
+        ("Günlük Dış Para Akışı", analysis.flow_note("gunluk") or "—", None),
+        ("Aylık Dış Para Akışı", analysis.flow_note("aylik") or "—", None),
+        ("Kapanan Pozisyon", analysis.closed_note or "—", None),
+        # Kolonlarin tabani: "%" ile "₺" ayni seyi olcmuyor ve Excel'de sayisal
+        # hucreye isaret konamadigi icin aciklamanin yeri burasi.
+        ("Kolonlar", config.COLUMN_BASIS_NOTE, None),
+        ("İşaretler", config.FLOW_MARK_NOTE, None),
+        ("Toplam Getirinin Tabanı", config.TOTAL_BASIS_NOTE, None),
         ("Durum", status, None),
         ("Rapor Tarihi", datetime.now().strftime("%d.%m.%Y %H:%M"), None),
     ]

@@ -10,13 +10,14 @@ Kullanim ornekleri (kurulu ise `portfoy`, degilse `python main.py`):
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import logging
 import sys
-from datetime import date
+from datetime import date, datetime, time as _time
 from pathlib import Path
 
 from . import __version__, analytics, charts, config, console, excel_report, storage
-from . import mailer, tefas_client
+from . import bekleyen, mailer, snapshots, tefas_client, valor
 from .formatting import fmt_money, fmt_price, fmt_units
 from .mailer import MailError
 from .storage import Portfolio, StorageError
@@ -41,6 +42,17 @@ def _collect_analysis(portfolio: Portfolio, args) -> analytics.PortfolioAnalysis
     """Fiyatlari ceker ve analizi uretir. Portfoy bossa None doner."""
     if portfolio.is_empty():
         path = args.data_file or config.PORTFOLIO_FILE
+        # Kapanmis pozisyon varsa dosya bos degil: fiyat cekilecek acik fon yok.
+        # "Kayitli fon yok" demek, duran islem gecmisini yok saymak olurdu.
+        closed = portfolio.closed_codes
+        if closed:
+            print(
+                f"Açık pozisyon yok — rapor üretilemiyor.\n"
+                f"Kapanmış pozisyon: {', '.join(closed)}\n"
+                f"İşlem geçmişi ve gerçekleşen kâr/zarar: "
+                f"{console.invocation()} lots {closed[0]}"
+            )
+            return None
         durum = "dosya henüz oluşmamış" if not path.exists() else "dosyada kayıtlı fon yok"
         print(
             f"Portföy boş ({durum}).\n"
@@ -53,10 +65,19 @@ def _collect_analysis(portfolio: Portfolio, args) -> analytics.PortfolioAnalysis
         )
         return None
 
-    print(f"TEFAS'tan veri çekiliyor: {', '.join(portfolio.codes)} ...")
+    # Karne penceresi buyutulduyse cekme penceresi de buyumeli; aksi halde
+    # `--months 12` sessizce 3 ay dondururdu.
+    months = getattr(args, "months", config.TRACK_RECORD_MONTHS)
+    lookback = max(args.days, config.lookback_for(months))
+
+    # Acik pozisyonlarin YANI SIRA yakin zamanda kapanmis olanlar da cekilir:
+    # pencere icinde satilan fonun satis gunune kadarki hareketi portfoy
+    # getirisine giriyor (bkz. storage.codes_for_pricing).
+    fetch_codes = portfolio.codes_for_pricing(lookback)
+    print(f"TEFAS'tan veri çekiliyor: {', '.join(fetch_codes)} ...")
     histories, failures = tefas_client.fetch_many(
-        portfolio.codes,
-        lookback_days=args.days,
+        fetch_codes,
+        lookback_days=lookback,
         use_cache=not args.no_cache,
     )
 
@@ -70,7 +91,37 @@ def _collect_analysis(portfolio: Portfolio, args) -> analytics.PortfolioAnalysis
             print(f"  - {code}: {message}", file=sys.stderr)
         return None
 
-    return analytics.analyze(portfolio, histories, failures)
+    # Gerceklesmis bekleyen emirleri fiyat gelir gelmez isle. Analizden ONCE
+    # olmali: cozulen emir portfoyu degistirir, analiz guncel hali gormeli.
+    yollar = config.yan_dosyalar(args.data_file)
+    for cozulen in bekleyen.coz_ve_kaydet(
+        portfolio, histories,
+        bekleyen_yolu=yollar["bekleyen"],
+        portfoy_yolu=args.data_file,
+    ):
+        print(f"Bekleyen emir gerçekleşti → {cozulen.ozet()}")
+
+    # Kalan bekleyenleri duyur: adetler tabloda hala goruntulenir (fiyat riski
+    # devam ettigi icin dogru) ama bir kismi fiilen satilmis durumdadir.
+    try:
+        kalanlar = bekleyen.yukle(yollar["bekleyen"])
+    except bekleyen.BekleyenHatasi:
+        kalanlar = []
+    if kalanlar:
+        print(f"\n{len(kalanlar)} bekleyen emir (adetler gerçekleşmeye kadar "
+              f"portföyde görünür):")
+        for emir in kalanlar:
+            print(f"  • {emir.ozet()}")
+        print()
+
+    analysis = analytics.analyze(portfolio, histories, failures)
+
+    # Gunun fotografini gecmise yaz: takvim ayi karnesinin "gerceklesen" kolu
+    # ancak boyle birikir. Kayit basarisiz olursa rapor yine de uretilir.
+    if not getattr(args, "no_snapshot", False):
+        snapshots.record(analysis, config.yan_dosyalar(args.data_file)["gecmis"])
+
+    return analysis
 
 
 # --------------------------------------------------------------------------
@@ -88,6 +139,7 @@ def cmd_add(args) -> int:
             total = portfolio.add_lot(code, args.units, on, args.price)
             print(f"{code}: {fmt_units(previous or 0)} + {fmt_units(args.units)} "
                   f"→ {fmt_units(total)} adet")
+            _print_close_summary(portfolio, code)
         else:
             if existing and len(existing.lots) > 1:
                 # Islem gecmisini sessizce silmek alis tarihlerini kaybettirir.
@@ -107,7 +159,7 @@ def cmd_add(args) -> int:
             else:
                 print(f"{code} kaydedildi → {fmt_units(args.units)} adet")
 
-        _print_lot_hint(portfolio, code, on, args.price)
+        _print_lot_hint(portfolio, code, on, args.price, args.units)
     except ValueError as exc:
         print(f"Hata: {exc}", file=sys.stderr)
         return EXIT_ERROR
@@ -119,10 +171,42 @@ def cmd_add(args) -> int:
     return EXIT_OK
 
 
-def _print_lot_hint(portfolio, code: str, on, price) -> None:
-    """Alis tarihi verildiyse ozetler, verilmediyse neden gerektigini soyler."""
+def _print_close_summary(portfolio, code: str) -> None:
+    """Pozisyon tamamen kapandiysa gerceklesmis kar/zarari yazar.
+
+    Kayit silinmedigi icin bu rakam sonradan da sorulabilir (`lots`); burada
+    gostermek, satisi girer girmez sonucu gormeyi sagliyor.
+    """
+    position = portfolio.positions.get(code)
+    if position is None or not position.is_closed:
+        return
+
+    closed_on = position.closed_on
+    tarih = f" ({closed_on:%d.%m.%Y})" if closed_on else ""
+    print(f"  {code} pozisyonu KAPANDI{tarih} - raporlarda artık yer almayacak.")
+
+    proceeds = position.realized_proceeds
+    if proceeds is not None:
+        print(f"  Toplam satış hasılatı : {fmt_money(proceeds)}")
+
+    profit = position.realized_profit
+    if profit is None:
+        print(
+            "  Gerçekleşmiş kâr/zarar: hesaplanamıyor — eşleşen alış veya satış\n"
+            f"  lotlarından birinde fiyat yok ({console.invocation()} lots {code})."
+        )
+        return
+
+    cost = position.realized_cost
+    oran = f" (%{profit / cost * 100:+.2f})" if cost else ""
+    print(f"  Gerçekleşmiş kâr/zarar: {fmt_money(profit)}{oran}")
+
+
+def _print_lot_hint(portfolio, code: str, on, price, units: float | None = None) -> None:
+    """Islem tarihi verildiyse ozetler, verilmediyse neden gerektigini soyler."""
     if on is not None:
-        detail = f"  Alış: {on:%d.%m.%Y}"
+        tur = "Satış" if units is not None and units < 0 else "Alış"
+        detail = f"  {tur}: {on:%d.%m.%Y}"
         if price:
             detail += f" · {fmt_price(price)} ₺"
         print(detail)
@@ -149,7 +233,9 @@ def _print_lot_hint(portfolio, code: str, on, price) -> None:
 def cmd_lots(args) -> int:
     """Kayitli alis/satis islemlerini gosterir (TEFAS'a baglanmadan)."""
     portfolio = _load_portfolio(args)
-    codes = [storage.normalize_code(args.code)] if args.code else portfolio.codes
+    # Kapanmis pozisyonlar da listelenir: `lots` islem gecmisini gosterir,
+    # elde kalani degil - satilan fonun kaydini saklamanin asil amaci bu.
+    codes = [storage.normalize_code(args.code)] if args.code else portfolio.all_codes
     if not codes:
         print("Portföy boş.")
         return EXIT_OK
@@ -160,7 +246,12 @@ def cmd_lots(args) -> int:
             print(f"{code} portföyde bulunamadı.", file=sys.stderr)
             return EXIT_ERROR
 
-        print(f"\n{code} — {fmt_units(position.units)} adet")
+        if position.is_closed:
+            closed_on = position.closed_on
+            tarih = f", {closed_on:%d.%m.%Y}" if closed_on else ""
+            print(f"\n{code} — KAPANDI{tarih}")
+        else:
+            print(f"\n{code} — {fmt_units(position.units)} adet")
         for lot in position.lots:
             tarih = lot.date.strftime("%d.%m.%Y") if lot.date else "tarih yok"
             fiyat = f"{fmt_price(lot.price)} ₺" if lot.price is not None else "fiyat yok"
@@ -171,6 +262,12 @@ def cmd_lots(args) -> int:
         if cost is not None:
             print(f"  {'toplam maliyet':>12}: {fmt_money(cost)} "
                   f"(ort. {fmt_price(position.average_cost)} ₺)")
+
+        profit = position.realized_profit
+        if profit is not None:
+            realized_cost = position.realized_cost
+            oran = f" (%{profit / realized_cost * 100:+.2f})" if realized_cost else ""
+            print(f"  {'gerçekleşen':>12}: {fmt_money(profit)}{oran}")
     print()
     return EXIT_OK
 
@@ -209,7 +306,7 @@ def cmd_status(args) -> int:
     analysis = _collect_analysis(_load_portfolio(args), args)
     if analysis is None:
         return EXIT_ERROR
-    console.render(analysis)
+    console.render(analysis, _track_record(analysis, args))
     return EXIT_OK
 
 
@@ -218,7 +315,288 @@ def cmd_help(args) -> int:
     return EXIT_OK
 
 
-def _produce_outputs(analysis, args) -> list[Path]:
+def _valor_takvimi_ve_kural(code: str, args) -> tuple:
+    """Fonun fiyat gecmisinden takvim, tablodan (yoksa kategoriden) kural."""
+    try:
+        history = tefas_client.fetch_history(code, lookback_days=config.LOOKBACK_DAYS)
+    except tefas_client.TefasError as exc:
+        raise ValueError(
+            f"{code} fiyat geçmişi alınamadı ({exc}). İş günü takvimi bu "
+            f"seriden türetildiği için valör hesaplanamıyor."
+        ) from None
+
+    takvim = valor.IslemTakvimi.seriden([ts.date() for ts in history.prices.index])
+    kurallar = valor.yukle(config.yan_dosyalar(args.data_file)["valor"])
+    kural = kurallar.get(code)
+    if kural is None:
+        kural = valor.kategori_kurali(tefas_client.fetch_category(code))
+    return history, takvim, kural, kurallar
+
+
+def cmd_emir(args) -> int:
+    """Emir zamanindan gerceklesme gununu turetip bekleyen emir olusturur."""
+    portfolio = _load_portfolio(args)
+    try:
+        code = storage.normalize_code(args.code)
+        if args.units <= 0:
+            raise ValueError("Adet sıfırdan büyük olmalı; yön için --sat / --al.")
+        emir_gunu = storage.parse_date(args.date)
+
+        # Saat ZORUNLU (ya acik saat ya da kesim tarafı). "Herhalde erkendi"
+        # varsayimi, bu araci en pahali sekilde yaniltan senaryonun kendisi:
+        # kesim sonrasi verilen emir bir sonraki is gunune kayar ve
+        # gerceklesme fiyati bir gun otelenir.
+        kesim_sonrasi = None
+        emir_zamani: datetime | date = emir_gunu
+        if args.saat:
+            try:
+                saat = datetime.strptime(args.saat, "%H:%M").time()
+            except ValueError:
+                raise ValueError(f"Saat 'SS:DD' biçiminde olmalı: {args.saat!r}") from None
+            emir_zamani = datetime.combine(emir_gunu, saat)
+        elif args.kesim_sonrasi:
+            kesim_sonrasi = True
+        elif args.kesim_oncesi:
+            kesim_sonrasi = False
+        else:
+            raise ValueError(
+                "Emri saat kaçta verdiğinizi belirtin: --saat SS:DD, ya da "
+                "--kesim-oncesi / --kesim-sonrasi. TEFAS'ta kesim 13:30; "
+                "sonrasında verilen emir ertesi iş gününe kayar."
+            )
+
+        history, takvim, kural, _ = _valor_takvimi_ve_kural(code, args)
+        satis = bool(args.sat)
+        cozum = valor.cozumle(
+            kural, takvim, emir_zamani, satis=satis, kesim_sonrasi=kesim_sonrasi
+        )
+    except (ValueError, valor.ValorHatasi) as exc:
+        print(f"Hata: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    tur = "SATIŞ" if satis else "ALIŞ"
+    print(f"\n{code} · {tur} · {fmt_units(args.units)} adet")
+    print(f"Emir: {emir_gunu:%d.%m.%Y}" + (f" {args.saat}" if args.saat else ""))
+    for satir in cozum.anlat(satis=satis):
+        print(f"  {satir}")
+
+    # Mutabakat: nakit tarihi kullanicinin ekraninda GORDUGU tek olgudur ve
+    # turetilen zincirin dogrulanabilir tek ucudur.
+    if args.nakit:
+        try:
+            beklenen = storage.parse_date(args.nakit)
+        except ValueError as exc:
+            print(f"Hata: {exc}", file=sys.stderr)
+            return EXIT_ERROR
+        uyari = valor.nakit_uyusmazligi(cozum, beklenen)
+        if uyari:
+            print(f"\nUYUŞMAZLIK: {uyari}", file=sys.stderr)
+            print("Emir kaydedilmedi. Emir saatini düzeltin veya "
+                  f"'{console.invocation()} valor {code}' ile valör kuralını "
+                  "güncelleyin.", file=sys.stderr)
+            return EXIT_ERROR
+        print("  ✓ Nakit tarihi tutuyor — türetilen zincir doğrulandı.")
+
+    try:
+        yollar = config.yan_dosyalar(args.data_file)
+        emirler = bekleyen.yukle(yollar["bekleyen"])
+        if satis:
+            bekleyen.satis_dogrula(portfolio, emirler, code, args.units)
+        emir = bekleyen.emir_olustur(
+            code, -args.units if satis else args.units, cozum, emir_zamani,
+            fiyat=args.price,
+        )
+        emirler.append(emir)
+        yol = bekleyen.kaydet(emirler, yollar["bekleyen"])
+    except bekleyen.BekleyenHatasi as exc:
+        print(f"\nHata: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    print(f"\nBekleyen emir kaydedildi: {yol}")
+    if cozum.gerceklesme > history.latest_date:
+        print(f"  {cozum.gerceklesme:%d.%m.%Y} değerleme fiyatı yayımlandığında "
+              "işlem kaydına dönüşecek.")
+        print(f"  Adetler o güne kadar portföyde kalır — fiyat riski sizde.")
+    return EXIT_OK
+
+
+def cmd_bekleyen(args) -> int:
+    """Bekleyen emirleri listeler; --sil ile iptal eder."""
+    yollar = config.yan_dosyalar(args.data_file)
+    try:
+        emirler = bekleyen.yukle(yollar["bekleyen"])
+    except bekleyen.BekleyenHatasi as exc:
+        print(f"Hata: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    if args.sil:
+        kalan = [e for e in emirler if e.id != args.sil]
+        if len(kalan) == len(emirler):
+            print(f"'{args.sil}' kimlikli bekleyen emir yok.", file=sys.stderr)
+            return EXIT_ERROR
+        bekleyen.kaydet(kalan, yollar["bekleyen"])
+        print(f"Bekleyen emir silindi: {args.sil}")
+        return EXIT_OK
+
+    if not emirler:
+        print("Bekleyen emir yok.")
+        return EXIT_OK
+
+    print(f"\n{len(emirler)} bekleyen emir\n")
+    for emir in emirler:
+        print(f"  {emir.id}  {emir.ozet()}")
+        detay = f"         emir {emir.emir_zamani} · tarih {emir.tarih_kaynagi}"
+        if emir.fiyat is not None:
+            detay += f" · fiyat girildi {fmt_price(emir.fiyat)} ₺"
+        print(detay)
+        if emir.valor_supheli:
+            print("         NOT: türetildiğinde valör kuralı henüz "
+                  "doğrulanmamıştı; nakit tarihini aracı kurum ekranıyla "
+                  "karşılaştırın.")
+    print(f"\nİptal için: {console.invocation()} bekleyen --sil <kimlik>\n")
+    return EXIT_OK
+
+
+def cmd_valor(args) -> int:
+    """Valor kurallarini gosterir ve duzenler."""
+    valor_yolu = config.yan_dosyalar(args.data_file)["valor"]
+    kurallar = valor.yukle(valor_yolu)
+
+    if args.code is None:
+        if not kurallar:
+            print("Kayıtlı valör kuralı yok; kategori varsayılanları kullanılıyor.")
+            print(f"Bir fonun kuralını görmek için: {console.invocation()} valor TMV")
+            return EXIT_OK
+        print("\nKayıtlı valör kuralları (iş günü)\n")
+        for kod in sorted(kurallar):
+            k = kurallar[kod]
+            durum = "ŞÜPHELİ" if k.supheli else f"doğrulandı {k.dogrulandi:%d.%m.%Y}"
+            print(f"  {kod:<5} alış T+{k.alis_valor}/nakit T+{k.alis_nakit}  "
+                  f"satış T+{k.satis_valor}/nakit T+{k.satis_nakit}  "
+                  f"[{k.kaynak}, {durum}]")
+        print()
+        return EXIT_OK
+
+    try:
+        code = storage.normalize_code(args.code)
+    except ValueError as exc:
+        print(f"Hata: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    kural = kurallar.get(code)
+    if kural is None:
+        kategori = tefas_client.fetch_category(code)
+        kural = valor.kategori_kurali(kategori)
+        print(f"{code} için kayıtlı kural yok; "
+              f"kategori varsayılanı kullanılıyor ({kategori or 'kategori bilinmiyor'}).")
+
+    degisti = False
+    for ad, yeni in (
+        ("alis_valor", args.alis_valor), ("alis_nakit", args.alis_nakit),
+        ("satis_valor", args.satis_valor), ("satis_nakit", args.satis_nakit),
+    ):
+        if yeni is not None:
+            if not 0 <= yeni <= 10:
+                print(f"Hata: {ad} 0-10 iş günü arasında olmalı.", file=sys.stderr)
+                return EXIT_ERROR
+            # `dogrulandi=None`: dogrulama ESKI rakamlar icindi. Korunsaydi
+            # hic teyit edilmemis yeni rakam yesil "DOĞRULANDI" rozetiyle
+            # gorunurdu - `supheli` mekanizmasinin tamami bu ayrim icin var.
+            kural = dataclasses.replace(
+                kural, **{ad: yeni}, kaynak="elle", dogrulandi=None
+            )
+            degisti = True
+
+    if args.dogrula:
+        kural = valor.dogrula(kural)
+        degisti = True
+
+    if degisti:
+        kurallar[code] = kural
+        yol = valor.kaydet(kurallar, valor_yolu)
+        print(f"Kaydedildi: {yol}")
+
+    durum = "ŞÜPHELİ — doğrulanmadı" if kural.supheli else f"doğrulandı {kural.dogrulandi:%d.%m.%Y}"
+    print(f"\n{code} valör kuralı ({kural.kaynak}, {durum})")
+    print(f"  Alış : T+{kural.alis_valor} fiyat · T+{kural.alis_nakit} nakit")
+    print(f"  Satış: T+{kural.satis_valor} fiyat · T+{kural.satis_nakit} nakit")
+    if kural.supheli:
+        print(f"\n  Doğrulamak için önce bir emrin nakit tarihini karşılaştırın,")
+        print(f"  sonra: {console.invocation()} valor {code} --dogrula\n")
+    return EXIT_OK
+
+
+def cmd_web(args) -> int:
+    """Web arayuzunu baslatir.
+
+    Bagimliliklar (fastapi, uvicorn, jinja2) opsiyoneldir: CLI'ı yalnizca
+    terminalden kullanan birine web yigini kurdurmak dogru olmaz. Eksikse
+    kurulum komutunu soyleyip cikiyoruz.
+    """
+    try:
+        from .web import run
+    except ImportError as exc:
+        print(
+            f"Web arayüzü için ek paketler gerekiyor ({exc.name}).\n"
+            "  pip install 'portfoy-cli[web]'\n"
+            "veya:\n"
+            "  pip install fastapi uvicorn jinja2 python-multipart",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+
+    adres = f"http://{args.host}:{args.port}"
+    print(f"Portföy arayüzü: {adres}")
+    if args.host in {"127.0.0.1", "localhost"}:
+        print("Yalnızca bu bilgisayardan erişilebilir. Durdurmak için Ctrl+C.")
+    else:
+        # Baglanma adresini degistirmek bilincli bir karar olmali: arayuzde
+        # kimlik dogrulama YOK, portfoyu goren herkes degistirebilir.
+        # `run()` bu adresi izinli konak listesine ekler; eklemeseydi sunucu
+        # calisir ama konak kalkani her istegi 403'lerdi.
+        print(
+            f"UYARI: {args.host} adresine bağlanılıyor. Arayüzde parola koruması "
+            "yoktur;\n"
+            "ağdaki herkes portföyü görebilir ve değiştirebilir.",
+            file=sys.stderr,
+        )
+
+    if args.open:
+        import threading
+        import webbrowser
+
+        # Sunucu ayaga kalkmadan acilan sekme bos sayfa gosterir; kisa gecikme
+        # tek basina yeterli degil ama pratikte calisiyor ve basarisiz olursa
+        # kullanici adresi zaten yukarida goruyor.
+        threading.Timer(1.0, lambda: webbrowser.open(adres)).start()
+
+    try:
+        run(
+            host=args.host,
+            port=args.port,
+            data_file=getattr(args, "web_data_file", None) or args.data_file,
+            output_dir=args.output_dir,
+        )
+    except KeyboardInterrupt:
+        print("\nArayüz durduruldu.")
+    except OSError as exc:
+        print(f"Sunucu başlatılamadı: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    return EXIT_OK
+
+
+def _track_record(analysis, args) -> list:
+    """Takvim ayi karnesi; `--no-track` verildiyse bos liste."""
+    if getattr(args, "no_track", False):
+        return []
+    return analytics.monthly_track_record(
+        analysis,
+        snapshots.load(config.yan_dosyalar(args.data_file)["gecmis"]),
+        months=getattr(args, "months", config.TRACK_RECORD_MONTHS),
+    )
+
+
+def _produce_outputs(analysis, args, track_record: list | None = None) -> list[Path]:
     """Excel ve grafikleri üretir; e-postaya da bunlar eklenir."""
     output_dir = args.output_dir or config.OUTPUT_DIR
     produced: list[Path] = []
@@ -237,7 +615,8 @@ def _produce_outputs(analysis, args) -> list[Path]:
                 output_dir=output_dir,
                 theme=args.theme,
                 show=getattr(args, "show", False),
-                period=args.period,
+                periods=tuple(args.period),
+                track_record=track_record or [],
             )
         )
 
@@ -249,9 +628,11 @@ def cmd_report(args) -> int:
     if analysis is None:
         return EXIT_ERROR
 
-    console.render(analysis)
+    # Karne bir kez hesaplanir; hem terminale hem grafige ayni liste gider.
+    track_record = _track_record(analysis, args)
+    console.render(analysis, track_record)
 
-    produced = _produce_outputs(analysis, args)
+    produced = _produce_outputs(analysis, args, track_record)
 
     if produced:
         print("Oluşturulan dosyalar:")
@@ -260,7 +641,7 @@ def cmd_report(args) -> int:
 
     # Dosyalar yazildiktan SONRA e-posta: uretilen dosyalar eke gidiyor.
     # Gonderim basarisiz olsa bile rapor diske yazilmis durumda.
-    mail_sent = _maybe_send_mail(analysis, produced, args)
+    mail_sent = _maybe_send_mail(analysis, produced, args, track_record)
 
     if not produced and not mail_sent:
         print("Hiçbir çıktı üretilmedi.", file=sys.stderr)
@@ -269,7 +650,7 @@ def cmd_report(args) -> int:
     return EXIT_OK
 
 
-def _maybe_send_mail(analysis, attachments: list[Path], args) -> bool:
+def _maybe_send_mail(analysis, attachments: list[Path], args, track_record=None) -> bool:
     """Ayarlar tamsa raporu e-postayla gönderir. Gönderildiyse True döner."""
     if args.no_email:
         return False
@@ -285,7 +666,7 @@ def _maybe_send_mail(analysis, attachments: list[Path], args) -> bool:
         return False
 
     try:
-        recipients = mailer.send_report(analysis, attachments, settings)
+        recipients = mailer.send_report(analysis, attachments, settings, track_record)
     except MailError as exc:
         print(f"E-posta gönderilemedi: {exc}", file=sys.stderr)
         return False
@@ -352,14 +733,15 @@ def cmd_mail_test(args) -> int:
 
     # Test, gercek raporun aynisini gondersin: ekler dahil. Aksi halde test
     # gecer ama asil e-postada eklerin bozuk oldugu fark edilmez.
-    produced = _produce_outputs(analysis, args)
+    track_record = _track_record(analysis, args)
+    produced = _produce_outputs(analysis, args, track_record)
     if produced:
         print("\nEklenen dosyalar:")
         for item in produced:
             print(f"  • {item.name}")
 
     try:
-        recipients = mailer.send_report(analysis, produced, settings)
+        recipients = mailer.send_report(analysis, produced, settings, track_record)
     except MailError as exc:
         print(f"\nBaşarısız: {exc}", file=sys.stderr)
         return EXIT_ERROR
@@ -441,6 +823,79 @@ def build_parser() -> argparse.ArgumentParser:
     p_remove.add_argument("code", help="Fon kodu")
     p_remove.set_defaults(func=cmd_remove)
 
+    # --- emir ---
+    p_emir = subparsers.add_parser(
+        "emir",
+        help="Emir zamanından gerçekleşme gününü türetip bekleyen emir oluştur.",
+    )
+    p_emir.add_argument("code", help="Fon kodu")
+    p_emir.add_argument("units", type=float, help="Adet (pozitif; yön için --sat/--al)")
+    yon = p_emir.add_mutually_exclusive_group(required=True)
+    yon.add_argument("--sat", action="store_true", help="Satış emri")
+    yon.add_argument("--al", action="store_true", help="Alış emri")
+    p_emir.add_argument("--tarih", dest="date", required=True,
+                        metavar="GG.AA.YYYY", help="Emri verdiğiniz gün")
+    p_emir.add_argument("--saat", metavar="SS:DD",
+                        help="Emri verdiğiniz saat (TEFAS kesimi 13:30)")
+    kesim = p_emir.add_mutually_exclusive_group()
+    kesim.add_argument("--kesim-oncesi", action="store_true",
+                       help="Saat bilinmiyorsa: emir 13:30'dan önce verildi")
+    kesim.add_argument("--kesim-sonrasi", action="store_true",
+                       help="Saat bilinmiyorsa: emir 13:30'dan sonra verildi")
+    p_emir.add_argument("--nakit", metavar="GG.AA.YYYY",
+                        help="Aracı kurumun gösterdiği nakit tarihi (mutabakat)")
+    p_emir.add_argument("--price", type=float, metavar="FİYAT",
+                        help="Gerçekleşen fiyat biliniyorsa; TEFAS beklenmez")
+    p_emir.set_defaults(func=cmd_emir)
+
+    # --- bekleyen ---
+    p_bek = subparsers.add_parser("bekleyen", help="Bekleyen emirleri göster.")
+    p_bek.add_argument("--sil", metavar="KİMLİK", help="Bekleyen emri iptal et")
+    p_bek.set_defaults(func=cmd_bekleyen)
+
+    # --- valor ---
+    p_val = subparsers.add_parser("valor", help="Fon valör kurallarını göster/düzenle.")
+    p_val.add_argument("code", nargs="?", help="Fon kodu (boşsa hepsi)")
+    p_val.add_argument("--alis-valor", type=int, metavar="N")
+    p_val.add_argument("--alis-nakit", type=int, metavar="N")
+    p_val.add_argument("--satis-valor", type=int, metavar="N")
+    p_val.add_argument("--satis-nakit", type=int, metavar="N")
+    p_val.add_argument("--dogrula", action="store_true",
+                       help="Kuralı doğrulanmış işaretle (artık şüpheli sayılmaz)")
+    p_val.set_defaults(func=cmd_valor)
+
+    # --- web ---
+    p_web = subparsers.add_parser("web", help="Web arayüzünü başlat.")
+    p_web.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bağlanılacak adres (varsayılan: 127.0.0.1 — yalnızca bu bilgisayar)",
+    )
+    p_web.add_argument(
+        "--port", type=int, default=8000, help="Port (varsayılan: 8000)"
+    )
+    p_web.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=f"Excel ve grafiklerin yazılacağı klasör (varsayılan: {config.OUTPUT_DIR})",
+    )
+    p_web.add_argument(
+        "--open", action="store_true", help="Tarayıcıyı otomatik aç."
+    )
+    # `--data-file` genel bir bayrak ama `portfoy web --data-file X` yazmak
+    # dogal geliyor; alt komutta da kabul edip genel degeri eziyoruz.
+    p_web.add_argument(
+        "--data-file",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        dest="web_data_file",
+        help="Portföy JSON dosyası (genel --data-file ile aynı işi görür).",
+    )
+    p_web.set_defaults(func=cmd_web)
+
     # --- list ---
     p_list = subparsers.add_parser("list", help="Kayıtlı fonları göster (veri çekmeden).")
     p_list.set_defaults(func=cmd_list)
@@ -452,6 +907,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- veri cekmeli komutlar icin ortak flag'ler ---
     fetch_flags = argparse.ArgumentParser(add_help=False)
+    fetch_flags.add_argument(
+        "--months",
+        type=int,
+        default=config.TRACK_RECORD_MONTHS,
+        metavar="N",
+        help=(
+            "Takvim ayı karnesinde kaç kapanmış ay gösterilsin "
+            f"(varsayılan: {config.TRACK_RECORD_MONTHS})"
+        ),
+    )
+    fetch_flags.add_argument(
+        "--no-snapshot",
+        action="store_true",
+        help="Bu çalıştırmayı geçmişe kaydetme (takvim ayı karnesini beslemez).",
+    )
     fetch_flags.add_argument(
         "--days",
         type=int,
@@ -480,13 +950,21 @@ def build_parser() -> argparse.ArgumentParser:
     report_flags.add_argument("--no-excel", action="store_true", help="Excel çıktısını atla.")
     report_flags.add_argument("--no-charts", action="store_true", help="Grafikleri atla.")
     report_flags.add_argument(
+        "--no-track", action="store_true", help="Takvim ayı karnesini atla."
+    )
+    report_flags.add_argument(
         "--theme", choices=("light", "dark"), default="light", help="Grafik teması."
     )
     report_flags.add_argument(
         "--period",
+        nargs="+",
         choices=tuple(config.PERIODS),
-        default="aylik",
-        help="Katkı grafiğinin periyodu (varsayılan: aylik).",
+        default=["haftalik", "aylik"],
+        metavar="PERIYOT",
+        help=(
+            "Katkı ve değişim grafiklerinin periyotları; birden fazla verilebilir "
+            "(varsayılan: haftalik aylik)."
+        ),
     )
 
     # --- report ---
