@@ -397,7 +397,7 @@ olarak hesaplanır — lotun kaydedileceği fiyatın ta kendisiyle, ek varsayım
 girmeden:
 
 ```bash
-portfoy emir THF --al --tutar 226000 --tarih 04.09.2026 --saat 17:01 --nakit 08.09.2026
+portfoy emir THF --al --tutar 50000 --tarih 12.05.2026 --saat 17:01 --nakit 14.05.2026
 ```
 
 Adet bilinmediği sürece emir portföye **girmez** (alışta doğrusu bu: henüz
